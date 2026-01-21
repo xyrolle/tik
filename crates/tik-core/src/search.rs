@@ -104,9 +104,7 @@ impl SearchFilters {
     }
 
     pub fn matches_ticket(&self, ticket: &Ticket) -> bool {
-        if !self.status.is_empty()
-            && !self.status.contains(&ticket.status.as_str().to_string())
-        {
+        if !self.status.is_empty() && !self.status.contains(&ticket.status.as_str().to_string()) {
             return false;
         }
         if !self.types.is_empty() && !self.types.contains(&ticket.kind.as_str().to_string()) {
@@ -219,7 +217,9 @@ fn apply_filter(field: &str, value: &str, filters: &mut SearchFilters) -> Result
     match field.as_str() {
         "status" => {
             for v in split_values(value) {
-                filters.status.push(validate_enum("status", &v, &VALID_STATUS)?);
+                filters
+                    .status
+                    .push(validate_enum("status", v, &VALID_STATUS)?);
             }
             Ok(true)
         }
@@ -237,7 +237,7 @@ fn apply_filter(field: &str, value: &str, filters: &mut SearchFilters) -> Result
         }
         "type" => {
             for v in split_values(value) {
-                filters.types.push(validate_enum("type", &v, &VALID_TYPES)?);
+                filters.types.push(validate_enum("type", v, &VALID_TYPES)?);
             }
             Ok(true)
         }
@@ -245,7 +245,7 @@ fn apply_filter(field: &str, value: &str, filters: &mut SearchFilters) -> Result
             for v in split_values(value) {
                 filters
                     .priorities
-                    .push(validate_enum("priority", &v, &VALID_PRIORITIES)?);
+                    .push(validate_enum("priority", v, &VALID_PRIORITIES)?);
             }
             Ok(true)
         }
@@ -253,7 +253,7 @@ fn apply_filter(field: &str, value: &str, filters: &mut SearchFilters) -> Result
             for v in split_values(value) {
                 filters
                     .severities
-                    .push(validate_enum("severity", &v, &VALID_SEVERITIES)?);
+                    .push(validate_enum("severity", v, &VALID_SEVERITIES)?);
             }
             Ok(true)
         }
@@ -382,7 +382,7 @@ fn normalize_text_tokens(tokens: Vec<String>) -> Vec<String> {
     out
 }
 
-fn list_contains_all(values: &[String], required: &[String]) -> bool {
+pub fn list_contains_all(values: &[String], required: &[String]) -> bool {
     let set: HashSet<String> = values.iter().map(|v| v.to_lowercase()).collect();
     required.iter().all(|value| {
         let needle = value.to_lowercase();

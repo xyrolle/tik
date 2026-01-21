@@ -16,12 +16,16 @@ use crate::{Result, TikError};
 
 #[derive(Debug, Clone)]
 pub struct TicketStore {
-    tik_root: PathBuf,
+    data_root: PathBuf,
+    schema_dir: PathBuf,
 }
 
 impl TicketStore {
-    pub fn new(tik_root: PathBuf) -> TicketStore {
-        TicketStore { tik_root }
+    pub fn new(data_root: PathBuf, schema_dir: PathBuf) -> TicketStore {
+        TicketStore {
+            data_root,
+            schema_dir,
+        }
     }
 
     pub fn create(&self, new_ticket: NewTicket, actor: &str) -> Result<Ticket> {
@@ -83,7 +87,10 @@ impl TicketStore {
         tikfs::ensure_dir(&ticket_dir.join("artifacts"))?;
 
         let mut events = events;
-        if events.iter().all(|event| event.data.get("ticket").is_none()) {
+        if events
+            .iter()
+            .all(|event| event.data.get("ticket").is_none())
+        {
             let snapshot = Event::new(
                 "imported",
                 actor,
@@ -156,7 +163,7 @@ impl TicketStore {
 
     pub fn list(&self, status: Option<TicketStatus>) -> Result<Vec<Ticket>> {
         let mut tickets = Vec::new();
-        let tickets_dir = self.tik_root.join("tickets");
+        let tickets_dir = self.data_root.join("tickets");
         if !tickets_dir.exists() {
             return Ok(tickets);
         }
@@ -1010,11 +1017,12 @@ impl TicketStore {
     pub fn rebuild_from_events(&self, id: &TicketId, events: &[Event]) -> Result<Ticket> {
         let mut snapshot_idx = None;
         for (idx, event) in events.iter().enumerate() {
-            if event.kind == "created" || event.kind == "ticket_edited" || event.kind == "imported"
+            if (event.kind == "created"
+                || event.kind == "ticket_edited"
+                || event.kind == "imported")
+                && event.data.get("ticket").is_some()
             {
-                if event.data.get("ticket").is_some() {
-                    snapshot_idx = Some(idx);
-                }
+                snapshot_idx = Some(idx);
             }
         }
 
@@ -1022,7 +1030,9 @@ impl TicketStore {
             snapshot_idx.ok_or_else(|| TikError::Schema("missing ticket snapshot".to_string()))?;
         let snapshot = extract_ticket_snapshot(&events[snapshot_idx])?;
         if snapshot.id != *id {
-            return Err(TikError::Schema("ticket id mismatch in snapshot".to_string()));
+            return Err(TikError::Schema(
+                "ticket id mismatch in snapshot".to_string(),
+            ));
         }
 
         let mut ticket = snapshot;
@@ -1036,15 +1046,15 @@ impl TicketStore {
     }
 
     fn schema_dir(&self) -> PathBuf {
-        self.tik_root.join("schema")
+        self.schema_dir.clone()
     }
 
     fn ticket_dir(&self, id: &TicketId) -> PathBuf {
-        self.tik_root.join("tickets").join(id.as_str())
+        self.data_root.join("tickets").join(id.as_str())
     }
 
     fn milestone_path(&self, id: &MilestoneId) -> PathBuf {
-        self.tik_root
+        self.data_root
             .join("milestones")
             .join(format!("{}.json", id.as_str()))
     }
@@ -1133,9 +1143,9 @@ fn extract_string_list(data: &Value, key: &str) -> Result<Vec<String>> {
 
     let mut out = Vec::with_capacity(list.len());
     for value in list {
-        let value = value.as_str().ok_or_else(|| {
-            TikError::Schema(format!("event data {key} must be a string list"))
-        })?;
+        let value = value
+            .as_str()
+            .ok_or_else(|| TikError::Schema(format!("event data {key} must be a string list")))?;
         let trimmed = value.trim();
         if !trimmed.is_empty() {
             out.push(trimmed.to_string());
@@ -1156,7 +1166,9 @@ fn apply_event(ticket: &mut Ticket, event: &Event) -> Result<()> {
         "ticket_edited" => {
             let snapshot = extract_ticket_snapshot(event)?;
             if snapshot.id != ticket.id {
-                return Err(TikError::Schema("ticket id mismatch in edit snapshot".to_string()));
+                return Err(TikError::Schema(
+                    "ticket id mismatch in edit snapshot".to_string(),
+                ));
             }
             *ticket = snapshot;
             Ok(())
@@ -1167,8 +1179,10 @@ fn apply_event(ticket: &mut Ticket, event: &Event) -> Result<()> {
             Ok(())
         }
         "milestone_set" => {
-            let milestone_id = extract_optional_str(&event.data, "milestone_id")?
-                .ok_or_else(|| TikError::Schema("milestone_set missing milestone_id".to_string()))?;
+            let milestone_id =
+                extract_optional_str(&event.data, "milestone_id")?.ok_or_else(|| {
+                    TikError::Schema("milestone_set missing milestone_id".to_string())
+                })?;
             ticket.milestone_id = Some(MilestoneId::parse(milestone_id)?);
             ticket.touch(&event.ts);
             Ok(())
@@ -1290,9 +1304,7 @@ fn apply_event(ticket: &mut Ticket, event: &Event) -> Result<()> {
             ticket.touch(&event.ts);
             Ok(())
         }
-        other => Err(TikError::Schema(format!(
-            "unsupported event kind: {other}"
-        ))),
+        other => Err(TikError::Schema(format!("unsupported event kind: {other}"))),
     }
 }
 
@@ -1375,7 +1387,7 @@ mod tests {
         assert_eq!(loaded.tags, vec!["mvp"]);
 
         let status = repo.status().unwrap();
-        let notes_md = PathBuf::from(status.tik_root)
+        let notes_md = PathBuf::from(status.project_root)
             .join("tickets")
             .join(ticket.id.as_str())
             .join("notes.md");
@@ -1451,7 +1463,7 @@ mod tests {
             .unwrap();
 
         let status = repo.status().unwrap();
-        let notes_path = PathBuf::from(status.tik_root)
+        let notes_path = PathBuf::from(status.project_root)
             .join("tickets")
             .join(ticket.id.as_str())
             .join("notes.md");
@@ -1479,14 +1491,15 @@ mod tests {
             .unwrap();
 
         let status = repo.status().unwrap();
-        let tik_root = PathBuf::from(&status.tik_root);
-        let notes_path = tik_root
+        let data_root = PathBuf::from(&status.project_root);
+        let notes_path = data_root
             .join("tickets")
             .join(ticket.id.as_str())
             .join("notes.md");
         std::fs::remove_file(&notes_path).unwrap();
 
-        let store = TicketStore::new(tik_root);
+        let schema_dir = PathBuf::from(&status.tik_root).join("schema");
+        let store = TicketStore::new(data_root, schema_dir);
         let contents = store.read_notes_md_if_exists(&ticket.id).unwrap();
         assert_eq!(contents, "");
     }
@@ -1649,7 +1662,8 @@ mod tests {
         let events = repo.read_events(&ticket.id).unwrap();
 
         let status = repo.status().unwrap();
-        let store = TicketStore::new(PathBuf::from(status.tik_root));
+        let schema_dir = PathBuf::from(&status.tik_root).join("schema");
+        let store = TicketStore::new(PathBuf::from(status.project_root), schema_dir);
         let rebuilt = store.rebuild_from_events(&ticket.id, &events).unwrap();
         let current = repo.load_ticket(&ticket.id).unwrap();
         assert_eq!(rebuilt.milestone_id, current.milestone_id);
@@ -1660,8 +1674,9 @@ mod tests {
     fn import_ticket_inserts_snapshot_event() {
         let test_repo = init_repo();
         let status = test_repo.repo.status().unwrap();
-        let tik_root = PathBuf::from(status.tik_root);
-        let store = TicketStore::new(tik_root.clone());
+        let data_root = PathBuf::from(status.project_root);
+        let schema_dir = PathBuf::from(status.tik_root).join("schema");
+        let store = TicketStore::new(data_root.clone(), schema_dir);
         let ticket = Ticket::new(
             NewTicket {
                 title: "Imported".to_string(),

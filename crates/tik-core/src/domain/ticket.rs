@@ -93,13 +93,165 @@ impl Severity {
     }
 }
 
+/// Estimate unit enum for structured estimation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimateUnit {
+    Hours,
+    Days,
+    Weeks,
+    #[default]
+    Points,
+    StoryPoints,
+}
+
+impl EstimateUnit {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EstimateUnit::Hours => "hours",
+            EstimateUnit::Days => "days",
+            EstimateUnit::Weeks => "weeks",
+            EstimateUnit::Points => "points",
+            EstimateUnit::StoryPoints => "story_points",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        EstimateUnit::from_str(value)
+    }
+}
+
+impl FromStr for EstimateUnit {
+    type Err = TikError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let lower = s.to_lowercase();
+        match lower.as_str() {
+            "hours" | "h" | "hour" | "hr" | "hrs" => Ok(EstimateUnit::Hours),
+            "days" | "d" | "day" => Ok(EstimateUnit::Days),
+            "weeks" | "w" | "week" | "wk" | "wks" => Ok(EstimateUnit::Weeks),
+            "points" | "p" | "pt" | "pts" | "point" => Ok(EstimateUnit::Points),
+            "story_points" | "sp" | "storypoint" | "storypoints" => Ok(EstimateUnit::StoryPoints),
+            _ => Err(TikError::Schema(format!("invalid estimate unit: {s}"))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Estimate {
     pub value: f64,
+    /// The unit field supports both string (legacy) and EstimateUnit enum.
+    /// For backward compatibility, we serialize/deserialize as string.
     pub unit: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl Estimate {
+    pub fn new(value: f64, unit: EstimateUnit) -> Self {
+        Self {
+            value,
+            unit: unit.as_str().to_string(),
+        }
+    }
+
+    pub fn unit_enum(&self) -> Result<EstimateUnit> {
+        EstimateUnit::parse(&self.unit)
+    }
+}
+
+/// Acceptance criterion with completion tracking.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum AcceptanceCriterion {
+    /// Legacy format: just a string.
+    Simple(String),
+    /// New format: structured with completion tracking.
+    Structured {
+        text: String,
+        completed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        completed_at: Option<String>,
+    },
+}
+
+impl AcceptanceCriterion {
+    pub fn new(text: String) -> Self {
+        AcceptanceCriterion::Structured {
+            text,
+            completed: false,
+            completed_at: None,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        match self {
+            AcceptanceCriterion::Simple(s) => s,
+            AcceptanceCriterion::Structured { text, .. } => text,
+        }
+    }
+
+    pub fn is_completed(&self) -> bool {
+        match self {
+            AcceptanceCriterion::Simple(_) => false,
+            AcceptanceCriterion::Structured { completed, .. } => *completed,
+        }
+    }
+
+    pub fn toggle(&mut self, now: &str) {
+        match self {
+            AcceptanceCriterion::Simple(text) => {
+                *self = AcceptanceCriterion::Structured {
+                    text: text.clone(),
+                    completed: true,
+                    completed_at: Some(now.to_string()),
+                };
+            }
+            AcceptanceCriterion::Structured {
+                completed,
+                completed_at,
+                ..
+            } => {
+                *completed = !*completed;
+                *completed_at = if *completed {
+                    Some(now.to_string())
+                } else {
+                    None
+                };
+            }
+        }
+    }
+
+    /// Convert a simple criterion to structured format.
+    pub fn to_structured(&self) -> AcceptanceCriterion {
+        match self {
+            AcceptanceCriterion::Simple(text) => AcceptanceCriterion::Structured {
+                text: text.clone(),
+                completed: false,
+                completed_at: None,
+            },
+            AcceptanceCriterion::Structured { .. } => self.clone(),
+        }
+    }
+}
+
+/// Normalize a tag to slug format: lowercase, hyphens only, no leading/trailing hyphens.
+pub fn normalize_tag(tag: &str) -> String {
+    tag.trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Normalize an assignee: lowercase, trimmed.
+pub fn normalize_assignee(assignee: &str) -> String {
+    assignee.trim().to_lowercase()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationType {
     Blocks,

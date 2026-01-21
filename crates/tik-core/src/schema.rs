@@ -255,11 +255,62 @@ const CONFIG_SCHEMA: &str = r#"{
 }
 "#;
 
+const WORKSPACE_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Workspace",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "default_project"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "default_project": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    }
+  }
+}
+"#;
+
+const PROJECT_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Project",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "description": {
+      "type": "string"
+    }
+  }
+}
+"#;
+
 pub struct SchemaRegistry {
     ticket: JSONSchema,
     milestone: JSONSchema,
     event: JSONSchema,
     config: JSONSchema,
+    workspace: JSONSchema,
+    project: JSONSchema,
 }
 
 impl SchemaRegistry {
@@ -268,12 +319,16 @@ impl SchemaRegistry {
         let milestone = compile_schema(&schema_dir.join("milestone.schema.json"))?;
         let event = compile_schema(&schema_dir.join("event.schema.json"))?;
         let config = compile_schema(&schema_dir.join("config.schema.json"))?;
+        let workspace = compile_schema(&schema_dir.join("workspace.schema.json"))?;
+        let project = compile_schema(&schema_dir.join("project.schema.json"))?;
 
         Ok(SchemaRegistry {
             ticket,
             milestone,
             event,
             config,
+            workspace,
+            project,
         })
     }
 
@@ -299,6 +354,18 @@ impl SchemaRegistry {
         let value = serde_json::to_value(config)
             .map_err(|err| TikError::Schema(format!("serialize config: {err}")))?;
         validate_value(&self.config, &value, "config")
+    }
+
+    pub fn validate_workspace(&self, workspace: &crate::workspace::WorkspaceConfig) -> Result<()> {
+        let value = serde_json::to_value(workspace)
+            .map_err(|err| TikError::Schema(format!("serialize workspace: {err}")))?;
+        validate_value(&self.workspace, &value, "workspace")
+    }
+
+    pub fn validate_project(&self, project: &crate::workspace::ProjectMeta) -> Result<()> {
+        let value = serde_json::to_value(project)
+            .map_err(|err| TikError::Schema(format!("serialize project: {err}")))?;
+        validate_value(&self.project, &value, "project")
     }
 }
 
@@ -330,6 +397,8 @@ pub fn write_default_schemas(schema_dir: &Path) -> Result<()> {
     fs::write_string_atomic(&schema_dir.join("milestone.schema.json"), MILESTONE_SCHEMA)?;
     fs::write_string_atomic(&schema_dir.join("event.schema.json"), EVENT_SCHEMA)?;
     fs::write_string_atomic(&schema_dir.join("config.schema.json"), CONFIG_SCHEMA)?;
+    fs::write_string_atomic(&schema_dir.join("workspace.schema.json"), WORKSPACE_SCHEMA)?;
+    fs::write_string_atomic(&schema_dir.join("project.schema.json"), PROJECT_SCHEMA)?;
 
     Ok(())
 }
@@ -341,6 +410,8 @@ pub fn ensure_default_schemas(schema_dir: &Path) -> Result<()> {
     write_if_missing(&schema_dir.join("milestone.schema.json"), MILESTONE_SCHEMA)?;
     write_if_missing(&schema_dir.join("event.schema.json"), EVENT_SCHEMA)?;
     write_if_missing(&schema_dir.join("config.schema.json"), CONFIG_SCHEMA)?;
+    write_if_missing(&schema_dir.join("workspace.schema.json"), WORKSPACE_SCHEMA)?;
+    write_if_missing(&schema_dir.join("project.schema.json"), PROJECT_SCHEMA)?;
     Ok(())
 }
 
@@ -357,6 +428,7 @@ mod tests {
     use crate::domain::event::Event;
     use crate::domain::milestone::{Milestone, NewMilestone};
     use crate::domain::ticket::{NewTicket, Ticket};
+    use crate::workspace::{ProjectMeta, WorkspaceConfig};
     use crate::Config;
     use tempfile::tempdir;
 
@@ -387,11 +459,15 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         let config = Config::default();
+        let workspace = WorkspaceConfig::new("default").unwrap();
+        let project = ProjectMeta::new("default", None).unwrap();
 
         registry.validate_ticket(&ticket).unwrap();
         registry.validate_milestone(&milestone).unwrap();
         registry.validate_event(&event).unwrap();
         registry.validate_config(&config).unwrap();
+        registry.validate_workspace(&workspace).unwrap();
+        registry.validate_project(&project).unwrap();
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::process::ExitCode;
 
 use serde_json::{Map, Value};
 use tik_core::{
-    ArtifactType, Estimate, Milestone, MilestoneStatus, NewMilestone, NewTicket, Priority, RelationType,
-    Repo, Result, Severity, Ticket, TicketStatus, TicketType, TikError,
+    ArtifactType, Estimate, Milestone, MilestoneStatus, NewMilestone, NewTicket, Priority,
+    RelationType, Repo, Result, Severity, Ticket, TicketStatus, TicketType, TikError,
 };
 
 fn main() -> ExitCode {
@@ -207,15 +207,30 @@ fn run(args: SeedArgs) -> Result<()> {
         ticket.custom = seed_custom("rel", true);
     })?;
 
-    ensure_status_transitions(&repo, &bootstrap.id, actor, &[TicketStatus::Closed, TicketStatus::Open])?;
+    ensure_status_transitions(
+        &repo,
+        &bootstrap.id,
+        actor,
+        &[TicketStatus::Closed, TicketStatus::Open],
+    )?;
     ensure_status(&repo, &bootstrap.id, actor, TicketStatus::Open)?;
     ensure_status(&repo, &tui.id, actor, TicketStatus::InProgress)?;
     ensure_status(&repo, &locking.id, actor, TicketStatus::Blocked)?;
     ensure_status(&repo, &docs.id, actor, TicketStatus::Closed)?;
     ensure_status(&repo, &archive.id, actor, TicketStatus::Archived)?;
 
-    repo.add_tags(&bootstrap.id, vec!["seed".into(), "demo".into()], actor, Some("seed add"))?;
-    repo.remove_tags(&bootstrap.id, vec!["demo".into()], actor, Some("seed remove"))?;
+    repo.add_tags(
+        &bootstrap.id,
+        vec!["seed".into(), "demo".into()],
+        actor,
+        Some("seed add"),
+    )?;
+    repo.remove_tags(
+        &bootstrap.id,
+        vec!["demo".into()],
+        actor,
+        Some("seed remove"),
+    )?;
     repo.set_tags(
         &bootstrap.id,
         vec!["mvp".into(), "cli".into(), "seed".into()],
@@ -223,9 +238,19 @@ fn run(args: SeedArgs) -> Result<()> {
         Some("seed set"),
     )?;
 
-    repo.add_assignees(&tui.id, vec!["ada".into(), "sam".into()], actor, Some("seed add"))?;
+    repo.add_assignees(
+        &tui.id,
+        vec!["ada".into(), "sam".into()],
+        actor,
+        Some("seed add"),
+    )?;
     repo.remove_assignees(&tui.id, vec!["sam".into()], actor, Some("seed remove"))?;
-    repo.set_assignees(&tui.id, vec!["ada".into(), "lee".into()], actor, Some("seed set"))?;
+    repo.set_assignees(
+        &tui.id,
+        vec!["ada".into(), "lee".into()],
+        actor,
+        Some("seed set"),
+    )?;
 
     repo.add_artifact(
         &bootstrap.id,
@@ -384,7 +409,12 @@ fn apply_ticket_patch(
     repo.apply_edit(id, &after, actor, Some(reason))
 }
 
-fn ensure_status(repo: &Repo, id: &tik_core::TicketId, actor: &str, status: TicketStatus) -> Result<()> {
+fn ensure_status(
+    repo: &Repo,
+    id: &tik_core::TicketId,
+    actor: &str,
+    status: TicketStatus,
+) -> Result<()> {
     let ticket = repo.load_ticket(id)?;
     if ticket.status == status {
         return Ok(());
@@ -431,7 +461,10 @@ fn ensure_notes_edited(repo: &Repo, id: &tik_core::TicketId, actor: &str) -> Res
 
 fn seed_custom(component: &str, seed: bool) -> Map<String, Value> {
     let mut custom = Map::new();
-    custom.insert("component".to_string(), Value::String(component.to_string()));
+    custom.insert(
+        "component".to_string(),
+        Value::String(component.to_string()),
+    );
     custom.insert("seed".to_string(), Value::Bool(seed));
     custom
 }

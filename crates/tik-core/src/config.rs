@@ -27,9 +27,8 @@ impl Config {
 
     pub fn load_legacy_toml(path: &Path) -> Result<Config> {
         let raw = fs::read_to_string(path)?;
-        toml::from_str(&raw).map_err(|err| {
-            TikError::Config(format!("invalid legacy config toml: {err}"))
-        })
+        toml::from_str(&raw)
+            .map_err(|err| TikError::Config(format!("invalid legacy config toml: {err}")))
     }
 
     pub fn get_value(&self, key: &str) -> Result<String> {
