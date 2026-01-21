@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "id": "T-01KFGH1Q2F44C815PCT4KXXFTA",
+  "title": "Seed: Archive test",
+  "status": "archived",
+  "type": "spike",
+  "priority": "medium",
+  "severity": "high",
+  "assignees": [],
+  "milestone_id": null,
+  "tags": [
+    "seed",
+    "archive"
+  ],
+  "created_at": "2026-01-21T14:58:57.231824Z",
+  "updated_at": "2026-01-21T15:21:07.946636Z",
+  "closed_at": null,
+  "summary": "Archived sample for UI coverage",
+  "description": "Seed fixture for archived status rendering",
+  "acceptance": [],
+  "estimate": null,
+  "due_at": null,
+  "relations": [],
+  "artifacts": [],
+  "custom": {
+    "component": "archive",
+    "seed": true
+  }
+}

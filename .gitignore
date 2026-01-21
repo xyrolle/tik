@@ -1,0 +1,32 @@
+# Build artifacts
+/target/
+debug/
+release/
+
+# Cargo (Cargo.lock is committed for binary projects)
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tiketer data (local repos)
+.tik/
+!fixtures/seed/.tik/
+!fixtures/seed/.tik/**
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test artifacts
+*.profraw
+*.profdata
+coverage/

@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "id": "T-01KFGFZZNSGCT8BZPWW9YA7B9P",
+  "title": "Add TUI polish",
+  "status": "in_progress",
+  "type": "feature",
+  "priority": "medium",
+  "severity": "low",
+  "assignees": [
+    "ada",
+    "lee"
+  ],
+  "milestone_id": null,
+  "tags": [
+    "ui",
+    "tui"
+  ],
+  "created_at": "2026-01-21T14:40:31.92914Z",
+  "updated_at": "2026-01-21T15:21:08.224483Z",
+  "closed_at": null,
+  "summary": "Improve layout and status bar",
+  "description": "## Context\n\n## Requirements\n",
+  "acceptance": [],
+  "estimate": null,
+  "due_at": null,
+  "relations": [
+    {
+      "type": "depends_on",
+      "id": "T-01KFGFZN1W0WM6T4586T8FPV46"
+    }
+  ],
+  "artifacts": [],
+  "custom": {
+    "component": "tui",
+    "seed": true
+  }
+}

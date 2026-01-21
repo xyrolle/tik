@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "id": "T-01KFGFZN1W0WM6T4586T8FPV46",
+  "title": "Bootstrap project",
+  "status": "open",
+  "type": "feature",
+  "priority": "high",
+  "severity": "normal",
+  "assignees": [],
+  "milestone_id": null,
+  "tags": [
+    "cli",
+    "mvp",
+    "seed"
+  ],
+  "created_at": "2026-01-21T14:40:21.05222Z",
+  "updated_at": "2026-01-21T15:21:08.400133Z",
+  "closed_at": null,
+  "summary": "Scaffold the repo layout",
+  "description": "## Context\n\n## Requirements\n",
+  "acceptance": [
+    "init works end-to-end",
+    "tui launches with default repo"
+  ],
+  "estimate": {
+    "value": 3.0,
+    "unit": "days"
+  },
+  "due_at": "2026-02-01T00:00:00Z",
+  "relations": [
+    {
+      "type": "blocks",
+      "id": "T-01KFGG05F55K97CATJ9Z2GFZDP"
+    }
+  ],
+  "artifacts": [
+    {
+      "type": "file",
+      "ref": "docs/seed.md"
+    },
+    {
+      "type": "url",
+      "ref": "https://example.com/spec"
+    }
+  ],
+  "custom": {
+    "component": "cli",
+    "seed": true
+  }
+}

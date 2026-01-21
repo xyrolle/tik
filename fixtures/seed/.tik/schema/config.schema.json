@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "output_format", "pager", "timezone"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "output_format": {
+      "type": "string",
+      "enum": ["table", "compact", "json", "jsonl", "yaml", "md", "csv"]
+    },
+    "pager": {
+      "type": "string",
+      "enum": ["auto", "always", "never"]
+    },
+    "timezone": {
+      "type": "string",
+      "enum": ["UTC", "local"]
+    }
+  }
+}

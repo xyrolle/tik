@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "id": "M-01KFGG408ZSFYMNTWXKV4NYMM8",
+  "title": "MVP",
+  "status": "open",
+  "created_at": "2026-01-21T14:42:43.615179Z",
+  "updated_at": "2026-01-21T14:42:43.615179Z",
+  "due_at": "2026-02-15T00:00:00Z",
+  "description": "First release slice",
+  "tags": [
+    "mvp"
+  ]
+}

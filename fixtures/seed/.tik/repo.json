@@ -1,0 +1,7 @@
+{
+  "schema_version": "1.0",
+  "layout_version": "1.0",
+  "id_strategy": "ulid",
+  "created_at": "2026-01-21T14:40:12.645964Z",
+  "cli_version": "0.1.0"
+}

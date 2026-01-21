@@ -1,0 +1,132 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Ticket",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "title",
+    "status",
+    "type",
+    "priority",
+    "severity",
+    "assignees",
+    "tags",
+    "created_at",
+    "updated_at",
+    "summary",
+    "description",
+    "acceptance",
+    "relations",
+    "artifacts",
+    "custom"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^T-[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "in_progress", "blocked", "closed", "archived"]
+    },
+    "type": {
+      "type": "string",
+      "enum": ["feature", "bug", "chore", "task", "spike"]
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "critical"]
+    },
+    "assignees": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "milestone_id": {
+      "type": ["string", "null"],
+      "pattern": "^M-[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "tags": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "closed_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "acceptance": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "estimate": {
+      "type": ["object", "null"],
+      "required": ["value", "unit"],
+      "properties": {
+        "value": {"type": "number"},
+        "unit": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "due_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "id"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["blocks", "blocked_by", "depends_on", "duplicate", "parent", "child"]
+          },
+          "id": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "ref"],
+        "properties": {
+          "type": {"type": "string", "enum": ["file", "url", "commit"]},
+          "ref": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "custom": {
+      "type": "object"
+    }
+  }
+}

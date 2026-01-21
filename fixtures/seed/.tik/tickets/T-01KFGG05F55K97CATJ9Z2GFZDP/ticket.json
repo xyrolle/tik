@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "id": "T-01KFGG05F55K97CATJ9Z2GFZDP",
+  "title": "Handle lock contention",
+  "status": "blocked",
+  "type": "bug",
+  "priority": "critical",
+  "severity": "critical",
+  "assignees": [],
+  "milestone_id": null,
+  "tags": [
+    "core",
+    "locking"
+  ],
+  "created_at": "2026-01-21T14:40:37.860942Z",
+  "updated_at": "2026-01-21T15:21:07.873817Z",
+  "closed_at": null,
+  "summary": "Surface lock wait errors",
+  "description": "## Context\n\n## Requirements\n",
+  "acceptance": [],
+  "estimate": null,
+  "due_at": null,
+  "relations": [
+    {
+      "type": "blocked_by",
+      "id": "T-01KFGFZN1W0WM6T4586T8FPV46"
+    }
+  ],
+  "artifacts": [
+    {
+      "type": "commit",
+      "ref": "deadbeef"
+    }
+  ],
+  "custom": {
+    "component": "locks",
+    "seed": true
+  }
+}
