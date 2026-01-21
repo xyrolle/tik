@@ -1065,7 +1065,9 @@ pub fn draw_tag_edit_overlay(frame: &mut Frame, state: &TagEditState, app: &App)
     let selected_suggestion_style = if app.no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -1142,7 +1144,9 @@ fn ticket_list_item<'a>(ticket: &'a Ticket, no_color: bool, is_selected: bool) -
     let selection_style = if no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     };
 
     let line = Line::from(vec![

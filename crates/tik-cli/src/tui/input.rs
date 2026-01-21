@@ -1,9 +1,9 @@
 //! TUI input handling.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tik_core::{MilestoneId, Priority, Result, Severity, TicketId, TicketStatus, TikError};
 #[allow(unused_imports)]
 use tik_core::TicketStatus as _;
+use tik_core::{MilestoneId, Priority, Result, Severity, TicketId, TicketStatus, TikError};
 
 use super::app::App;
 use super::state::{
@@ -1047,7 +1047,10 @@ impl App {
             .filter(|t| !state.tags.contains(t))
             .count();
 
-        self.status = format!("tags updated (+{} -{}) for {}", added, removed, state.ticket_id);
+        self.status = format!(
+            "tags updated (+{} -{}) for {}",
+            added, removed, state.ticket_id
+        );
         self.mode = Mode::Normal;
         Ok(false)
     }
@@ -1578,8 +1581,7 @@ mod tests {
         )
         .expect("create ticket");
 
-        let mut app =
-            App::new(dir.path().to_path_buf(), Some(repo), false).expect("create app");
+        let mut app = App::new(dir.path().to_path_buf(), Some(repo), false).expect("create app");
 
         assert_eq!(app.focused_panel, Panel::TicketList);
         let quit = app
@@ -1604,8 +1606,7 @@ mod tests {
         )
         .expect("create ticket");
 
-        let mut app =
-            App::new(dir.path().to_path_buf(), Some(repo), false).expect("create app");
+        let mut app = App::new(dir.path().to_path_buf(), Some(repo), false).expect("create app");
         let _ = app
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .expect("handle enter");

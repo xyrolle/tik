@@ -96,7 +96,9 @@ fn launch_editor(path: &std::path::Path) -> Result<()> {
 
     // Parse editor command (might have arguments like "code --wait")
     let mut parts = editor.split_whitespace();
-    let program = parts.next().ok_or_else(|| TikError::usage("empty EDITOR"))?;
+    let program = parts
+        .next()
+        .ok_or_else(|| TikError::usage("empty EDITOR"))?;
     let args: Vec<&str> = parts.collect();
 
     let mut cmd = Command::new(program);

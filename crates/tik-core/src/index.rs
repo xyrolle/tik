@@ -746,7 +746,9 @@ mod tests {
         notes.insert(ticket.id.as_str().to_string(), "Notes text".to_string());
 
         let store = IndexStore::new(data_root);
-        let summary = store.rebuild(std::slice::from_ref(&ticket), &notes).unwrap();
+        let summary = store
+            .rebuild(std::slice::from_ref(&ticket), &notes)
+            .unwrap();
         assert_eq!(summary.ticket_count, 1);
 
         let query = SearchQuery::parse("status:open mvp").unwrap();

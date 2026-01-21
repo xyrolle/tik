@@ -1184,8 +1184,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             if dot && cli.format.is_some() {
                 return Err(TikError::usage("--dot cannot be combined with --format"));
             }
-            let options =
-                build_graph_options(root, depth, relation, include_milestones)?;
+            let options = build_graph_options(root, depth, relation, include_milestones)?;
             let graph = repo.graph_with_options(&options)?;
             if !cli.quiet {
                 if dot {

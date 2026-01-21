@@ -163,7 +163,6 @@ impl Actor {
             }
         }
     }
-
 }
 
 impl std::fmt::Display for Actor {

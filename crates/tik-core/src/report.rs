@@ -464,11 +464,13 @@ pub fn compute_graph_scoped(
 
     let mut nodes: Vec<GraphNode> = included
         .iter()
-        .filter_map(|id| ticket_map.get(id).map(|ticket| GraphNode {
-            id: ticket.id.as_str().to_string(),
-            title: ticket.title.clone(),
-            status: ticket.status.as_str().to_string(),
-        }))
+        .filter_map(|id| {
+            ticket_map.get(id).map(|ticket| GraphNode {
+                id: ticket.id.as_str().to_string(),
+                title: ticket.title.clone(),
+                status: ticket.status.as_str().to_string(),
+            })
+        })
         .collect();
 
     let mut edges = Vec::new();
@@ -1042,8 +1044,8 @@ fn ticket_summary(ticket: Ticket) -> TicketSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::milestone::Milestone;
     use crate::domain::ids::TicketId;
+    use crate::domain::milestone::Milestone;
     use crate::domain::ticket::{NewTicket, Ticket};
     use serde_json::json;
 
@@ -1077,8 +1079,7 @@ mod tests {
             kind: crate::domain::ticket::RelationType::Blocks,
             id: target.id.clone(),
         });
-        let graph =
-            compute_graph_scoped(&[ticket, target], &[], &GraphOptions::default()).unwrap();
+        let graph = compute_graph_scoped(&[ticket, target], &[], &GraphOptions::default()).unwrap();
         assert_eq!(graph.edges.len(), 1);
     }
 
@@ -1106,11 +1107,20 @@ mod tests {
             relations: Vec::new(),
             include_milestones: false,
         };
-        let graph =
-            compute_graph_scoped(&[ticket_a.clone(), ticket_b.clone(), ticket_c], &[], &options)
-                .unwrap();
-        assert!(graph.nodes.iter().any(|node| node.id == ticket_a.id.as_str()));
-        assert!(graph.nodes.iter().any(|node| node.id == ticket_b.id.as_str()));
+        let graph = compute_graph_scoped(
+            &[ticket_a.clone(), ticket_b.clone(), ticket_c],
+            &[],
+            &options,
+        )
+        .unwrap();
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == ticket_a.id.as_str()));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == ticket_b.id.as_str()));
         assert_eq!(graph.nodes.len(), 2);
     }
 

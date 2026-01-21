@@ -2775,7 +2775,11 @@ mod tests {
         )
         .unwrap();
         let report = repo.burndown(&filters, ReportGroupBy::Day).unwrap();
-        let counts: Vec<usize> = report.points.iter().map(|point| point.open_tickets).collect();
+        let counts: Vec<usize> = report
+            .points
+            .iter()
+            .map(|point| point.open_tickets)
+            .collect();
         assert_eq!(counts, vec![1, 2, 1, 0]);
     }
 

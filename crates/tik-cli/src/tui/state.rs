@@ -109,7 +109,6 @@ impl DetailsTab {
             DetailsTab::Relations => 3,
         }
     }
-
 }
 
 /// Current mode of the TUI.
