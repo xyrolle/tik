@@ -4,6 +4,8 @@ use serde::Serialize;
 pub struct RepoStatus {
     pub repo_root: String,
     pub tik_root: String,
+    pub project: String,
+    pub project_root: String,
     pub schema_version: String,
     pub config_version: String,
     pub layout_version: String,

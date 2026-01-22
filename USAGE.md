@@ -91,9 +91,13 @@ tik <command> [options]
 |---------|-------------|
 | `tik init` | Initialize a new Tiketer repository |
 | `tik status` | Show repository health and statistics |
-| `tik config show/get/set` | Read or update repo configuration |
+| `tik config show/get/set/bootstrap` | Read or update repo configuration |
+| `tik doctor` | Validate repo integrity and surface issues |
+| `tik migrate` | Run schema/layout migrations |
+| `tik project init/list/select` | Manage workspace projects |
 | `tik milestone new/list/show/set/close` | Manage milestones |
 | `tik index rebuild` | Rebuild full-text index |
+| `tik index status` | Show index freshness and metadata |
 | `tik new <title>` | Create a new ticket |
 | `tik list` | List all tickets |
 | `tik show <id>` | Display ticket details |
@@ -125,6 +129,7 @@ tik <command> [options]
 | `--no-color` | Disable colored output |
 | `--quiet` | Suppress output |
 | `--non-interactive` | Disable interactive TUI and require a command |
+| `--project <name>` | Select a project in the current workspace |
 | `--help` | Show help for any command |
 
 ## Workflow Example
@@ -164,10 +169,23 @@ tik milestone set T-01ARZ3NDEKTSV4RRFFQ69G5FAV M-01ARZ3NDEKTSV4RRFFQ69G5FAV
 tik milestone close M-01ARZ3NDEKTSV4RRFFQ69G5FAV --reason "shipped"
 ```
 
+## Projects
+
+```sh
+tik project list
+tik project init "client-a" --description "Client A work"
+tik project select "client-a"
+tik --project client-a list
+```
+
+Projects are isolated under `.tik/projects/<name>/`. Use `--project` for monorepos or when you want
+to keep tickets separated by context.
+
 ## Search and Index
 
 ```sh
 tik index rebuild
+tik index status
 tik search "status:open tag:mvp login"
 tik search "created:>=2026-01-01 due:2026-02-01..2026-03-01"
 ```
@@ -176,12 +194,34 @@ Query filters:
 - `status`, `tag`, `assignee`, `type`, `priority`, `severity`, `milestone`
 - `created`, `updated`, `closed`, `due` with `>=`, `<=`, or `start..end`
 
+Sorting:
+- `tik list --sort updated`
+- `tik search "tag:mvp" --sort priority`
+- `tik report --metric summary --sort created`
+
 ## Reporting and Graphs
 
 ```sh
 tik stats
-tik report --limit 5
-tik graph --format md
+tik stats --status open --tag mvp --since 2026-01-01
+tik report --metric summary --limit 5 --sort updated --status open
+tik report --metric burndown --group-by week --since 2026-01-01 --until 2026-02-01
+tik report --metric throughput --group-by month --since 2026-01-01
+tik graph --root T-01ARZ3NDEKTSV4RRFFQ69G5FAV --depth 2 --relation blocks --include-milestones
+tik graph --dot > graph.dot
+```
+
+Report filters:
+- `--status`, `--tag`, `--assignee`, `--milestone`, `--since`, `--until`
+
+Group-by values for burndown/throughput: `day`, `week`, `month`.
+
+## Doctor and Migrate
+
+```sh
+tik doctor
+tik doctor --all-projects
+tik migrate
 ```
 
 ## Pagination
@@ -223,23 +263,41 @@ After running `tik init`, the following structure is created:
 .tik/
   repo.json              # Repository metadata
   config.json            # User configuration
+  workspace.json         # Workspace + project selection
   schema/
     ticket.schema.json   # Ticket JSON schema
     milestone.schema.json
     event.schema.json
     config.schema.json
-  tickets/
-    T-<ulid>/
-      ticket.json        # Ticket data
-      notes.jsonl        # Event log (append-only)
-      notes.md           # Human-readable notes
-  milestones/
-    M-<ulid>.json        # Milestone data
-    M-<ulid>.jsonl       # Milestone events (append-only)
-  index/
-    fts.sqlite           # SQLite FTS index (derived)
-    tickets.jsonl        # Index snapshot (derived)
+  projects/
+    default/
+      project.json       # Project metadata
+      config.json        # Project configuration
+      tickets/
+        T-<ulid>/
+          ticket.json    # Ticket data
+          notes.jsonl    # Event log (append-only)
+          notes.md       # Human-readable notes
+      milestones/
+        M-<ulid>.json    # Milestone data
+        M-<ulid>.jsonl   # Milestone events (append-only)
+      index/
+        fts.sqlite       # SQLite FTS index (derived)
+        tickets.jsonl    # Index snapshot (derived)
+      locks/
+      tmp/
+  locks/
+  tmp/
 ```
+
+### Config Keys (config.json)
+Common keys:
+- `output_format`, `pager`, `timezone`
+- `ticket_default_type`, `ticket_default_priority`, `ticket_default_severity`
+- `ticket_types`, `ticket_priorities`, `ticket_severities`, `ticket_statuses`
+- `ticket_tags`, `ticket_assignees`, `ticket_estimate_units`
+
+Empty lists mean "any". Use `tik config bootstrap` for guided setup.
 
 ## Output Formats
 

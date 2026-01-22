@@ -122,3 +122,83 @@ impl std::error::Error for TikError {
 }
 
 pub type Result<T> = std::result::Result<T, TikError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+    use std::io;
+
+    #[test]
+    fn error_codes_map_to_expected_values() {
+        let cases = vec![
+            (TikError::internal("boom"), ErrorCode::Internal),
+            (TikError::usage("bad"), ErrorCode::Usage),
+            (TikError::Schema("bad".to_string()), ErrorCode::Schema),
+            (TikError::NotFound("missing".to_string()), ErrorCode::NotFound),
+            (TikError::RepoInvalid("repo".to_string()), ErrorCode::RepoInvalid),
+            (TikError::LockContention("lock".to_string()), ErrorCode::LockContention),
+            (TikError::Conflict("conflict".to_string()), ErrorCode::Conflict),
+            (TikError::io("read", io::Error::new(io::ErrorKind::Other, "boom")), ErrorCode::Io),
+            (TikError::Permission("perm".to_string()), ErrorCode::Permission),
+            (TikError::Config("cfg".to_string()), ErrorCode::Config),
+            (TikError::Index("idx".to_string()), ErrorCode::Index),
+            (
+                TikError::ImportExport("io".to_string()),
+                ErrorCode::ImportExport,
+            ),
+            (
+                TikError::ExternalCommand("cmd".to_string()),
+                ErrorCode::ExternalCommand,
+            ),
+            (TikError::Ai("ai".to_string()), ErrorCode::Ai),
+            (TikError::Interrupted, ErrorCode::Interrupted),
+        ];
+
+        for (err, code) in cases {
+            assert_eq!(err.code(), code);
+        }
+    }
+
+    #[test]
+    fn display_formats_are_stable() {
+        let err = TikError::Usage("bad".to_string());
+        assert_eq!(err.to_string(), "usage error: bad");
+        let err = TikError::Schema("invalid".to_string());
+        assert_eq!(err.to_string(), "schema validation error: invalid");
+        let err = TikError::NotFound("missing".to_string());
+        assert_eq!(err.to_string(), "not found: missing");
+        let err = TikError::RepoInvalid("broken".to_string());
+        assert_eq!(err.to_string(), "repo invalid: broken");
+        let err = TikError::LockContention("held".to_string());
+        assert_eq!(err.to_string(), "lock contention: held");
+        let err = TikError::Conflict("boom".to_string());
+        assert_eq!(err.to_string(), "conflict detected: boom");
+        let err = TikError::Permission("denied".to_string());
+        assert_eq!(err.to_string(), "permission denied: denied");
+        let err = TikError::Config("cfg".to_string());
+        assert_eq!(err.to_string(), "config error: cfg");
+        let err = TikError::Index("idx".to_string());
+        assert_eq!(err.to_string(), "index error: idx");
+        let err = TikError::ImportExport("io".to_string());
+        assert_eq!(err.to_string(), "import/export error: io");
+        let err = TikError::ExternalCommand("cmd".to_string());
+        assert_eq!(err.to_string(), "external command failed: cmd");
+        let err = TikError::Ai("ai".to_string());
+        assert_eq!(err.to_string(), "ai backend error: ai");
+        let err = TikError::Interrupted;
+        assert_eq!(err.to_string(), "interrupted");
+        let err = TikError::internal("oops");
+        assert_eq!(err.to_string(), "internal error: oops");
+        let err = TikError::io("read", io::Error::new(io::ErrorKind::Other, "boom"));
+        assert!(err.to_string().contains("io error: read: boom"));
+    }
+
+    #[test]
+    fn source_is_only_set_for_io_errors() {
+        let err = TikError::io("read", io::Error::new(io::ErrorKind::Other, "boom"));
+        assert!(err.source().is_some());
+        let err = TikError::Usage("bad".to_string());
+        assert!(err.source().is_none());
+    }
+}

@@ -14,12 +14,16 @@ use crate::{Result, TikError};
 
 #[derive(Debug, Clone)]
 pub struct MilestoneStore {
-    tik_root: PathBuf,
+    data_root: PathBuf,
+    schema_dir: PathBuf,
 }
 
 impl MilestoneStore {
-    pub fn new(tik_root: PathBuf) -> MilestoneStore {
-        MilestoneStore { tik_root }
+    pub fn new(data_root: PathBuf, schema_dir: PathBuf) -> MilestoneStore {
+        MilestoneStore {
+            data_root,
+            schema_dir,
+        }
     }
 
     pub fn create(&self, new_milestone: NewMilestone, actor: &str) -> Result<Milestone> {
@@ -167,7 +171,7 @@ impl MilestoneStore {
     }
 
     fn milestones_dir(&self) -> PathBuf {
-        self.tik_root.join("milestones")
+        self.data_root.join("milestones")
     }
 
     fn milestone_path(&self, id: &MilestoneId) -> PathBuf {
@@ -179,7 +183,7 @@ impl MilestoneStore {
     }
 
     fn schema_dir(&self) -> PathBuf {
-        self.tik_root.join("schema")
+        self.schema_dir.clone()
     }
 }
 
@@ -279,9 +283,7 @@ mod tests {
         repo.close_milestone(&milestone.id, "human", None).unwrap();
 
         let open = repo.list_milestones(Some(MilestoneStatus::Open)).unwrap();
-        let closed = repo
-            .list_milestones(Some(MilestoneStatus::Closed))
-            .unwrap();
+        let closed = repo.list_milestones(Some(MilestoneStatus::Closed)).unwrap();
         assert!(open.is_empty());
         assert_eq!(closed.len(), 1);
     }

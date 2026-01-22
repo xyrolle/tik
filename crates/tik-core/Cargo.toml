@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+flate2 = "1.0"
 fs4.workspace = true
 jsonschema.workspace = true
 rusqlite.workspace = true
@@ -13,12 +14,16 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 shell-words.workspace = true
+tar = "0.4"
 tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
 toml.workspace = true
 ulid.workspace = true
 walkdir.workspace = true
+
+[dev-dependencies]
+filetime.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }

@@ -2,13 +2,20 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{generate, Shell};
+use dialoguer::Confirm;
 use is_terminal::IsTerminal;
+
+mod claude_setup;
+use claude_setup::setup_claude_integration;
 use tik_core::{
-    ArtifactType, Event, ExportBundle, ExportMilestone, ExportTicket, Graph, ImportSummary,
-    IndexSummary, Milestone, MilestoneId, MilestoneStatus, MilestoneSummary, NewMilestone,
-    NewTicket, RelationType, Report, Repo, RepoStatus, Result, SearchQuery, Stats, Ticket,
-    TicketId, TicketStatus, TicketSummary, TikError,
+    sort_tickets, ArtifactType, BackupSummary, BurndownReport, DataMigrationReport, DoctorReport,
+    Event, ExportBundle, ExportMilestone, ExportTicket, Graph, GraphOptions, ImportSummary,
+    IndexStatus, IndexSummary, MigrationSummary, Milestone, MilestoneId, MilestoneStatus,
+    MilestoneSummary, NewMilestone, NewTicket, ProjectMeta, RelationType, Repo, RepoStatus, Report,
+    ReportFilters, ReportGroupBy, RestoreSummary, Result, SearchQuery, Stats, ThroughputReport,
+    Ticket, TicketId, TicketSort, TicketStatus, TicketSummary, TikError,
 };
 
 mod tui;
@@ -24,17 +31,34 @@ struct Cli {
     no_color: bool,
     #[arg(long, global = true)]
     quiet: bool,
-    #[arg(long, global = true, help = "Disable interactive mode and require a command")]
+    #[arg(
+        long,
+        global = true,
+        help = "Disable interactive mode and require a command"
+    )]
     non_interactive: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Select a project in the current workspace"
+    )]
+    project: Option<String>,
     #[command(subcommand)]
     command: Option<Commands>,
 }
+
 
 #[derive(Subcommand)]
 enum Commands {
     Init {
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Automatically set up Claude Code integration (skill file + CLAUDE.md)
+        #[arg(long)]
+        setup_claude: bool,
+        /// Skip Claude Code integration prompt
+        #[arg(long)]
+        no_claude: bool,
     },
     Status {
         #[arg(long)]
@@ -43,6 +67,22 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    Doctor {
+        #[arg(long)]
+        all_projects: bool,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    Migrate {
         #[arg(long)]
         path: Option<PathBuf>,
     },
@@ -67,20 +107,62 @@ enum Commands {
         offset: usize,
         #[arg(long)]
         all: bool,
+        #[arg(long, value_enum)]
+        sort: Option<TicketSortArg>,
         #[arg(long)]
         path: Option<PathBuf>,
     },
     Stats {
+        #[arg(long, value_enum, value_delimiter = ',')]
+        status: Vec<TicketStatusArg>,
+        #[arg(long, value_delimiter = ',')]
+        tag: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        assignee: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        milestone: Vec<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
         #[arg(long)]
         path: Option<PathBuf>,
     },
     Report {
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        #[arg(long, value_enum)]
+        sort: Option<TicketSortArg>,
+        #[arg(long, value_enum, default_value = "summary")]
+        metric: ReportMetricArg,
+        #[arg(long, value_enum, default_value = "day")]
+        group_by: ReportGroupByArg,
+        #[arg(long, value_enum, value_delimiter = ',')]
+        status: Vec<TicketStatusArg>,
+        #[arg(long, value_delimiter = ',')]
+        tag: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        assignee: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        milestone: Vec<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
         #[arg(long)]
         path: Option<PathBuf>,
     },
     Graph {
+        #[arg(long, value_delimiter = ',')]
+        root: Vec<String>,
+        #[arg(long)]
+        depth: Option<usize>,
+        #[arg(long, value_enum, value_delimiter = ',')]
+        relation: Vec<RelationTypeArg>,
+        #[arg(long)]
+        include_milestones: bool,
+        #[arg(long)]
+        dot: bool,
         #[arg(long)]
         path: Option<PathBuf>,
     },
@@ -131,6 +213,8 @@ enum Commands {
         offset: usize,
         #[arg(long)]
         all: bool,
+        #[arg(long, value_enum)]
+        sort: Option<TicketSortArg>,
         #[arg(long)]
         path: Option<PathBuf>,
     },
@@ -262,6 +346,44 @@ enum Commands {
         #[arg(long)]
         path: Option<PathBuf>,
     },
+    #[command(about = "Generate shell completion scripts")]
+    Completion {
+        #[arg(value_enum, help = "Shell to generate completions for")]
+        shell: ShellArg,
+    },
+    #[command(about = "Create a backup of the repository")]
+    Backup {
+        #[arg(long, help = "Output file path")]
+        output: PathBuf,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    #[command(about = "Restore a repository from backup")]
+    Restore {
+        #[arg(long, help = "Input backup file path")]
+        input: PathBuf,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    #[command(about = "Run data migrations to update schema versions")]
+    DataMigrate {
+        #[arg(long, help = "Perform a dry run without making changes")]
+        dry_run: bool,
+        #[arg(long, help = "Target schema version (default: latest)")]
+        to_version: Option<String>,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+    #[command(about = "Toggle acceptance criterion completion")]
+    Accept {
+        id: String,
+        #[arg(help = "Index of the acceptance criterion (1-based)")]
+        index: usize,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -269,11 +391,27 @@ enum ConfigCommand {
     Show,
     Get { key: String },
     Set { key: String, value: String },
+    #[command(about = "Interactive config bootstrap")]
+    Bootstrap,
+}
+
+#[derive(Subcommand)]
+enum ProjectCommand {
+    Init {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    List,
+    Select {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum IndexCommand {
     Rebuild,
+    Status,
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -335,6 +473,59 @@ enum MilestoneCommand {
         #[arg(long)]
         actor: Option<String>,
     },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum TicketSortArg {
+    Id,
+    Updated,
+    Created,
+    Priority,
+    Status,
+    Title,
+}
+
+impl From<TicketSortArg> for TicketSort {
+    fn from(value: TicketSortArg) -> Self {
+        match value {
+            TicketSortArg::Id => TicketSort::Id,
+            TicketSortArg::Updated => TicketSort::Updated,
+            TicketSortArg::Created => TicketSort::Created,
+            TicketSortArg::Priority => TicketSort::Priority,
+            TicketSortArg::Status => TicketSort::Status,
+            TicketSortArg::Title => TicketSort::Title,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum ReportMetricArg {
+    #[value(name = "summary")]
+    Summary,
+    #[value(name = "burndown")]
+    Burndown,
+    #[value(name = "throughput")]
+    Throughput,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum ReportGroupByArg {
+    #[value(name = "day")]
+    Day,
+    #[value(name = "week")]
+    Week,
+    #[value(name = "month")]
+    Month,
+}
+
+impl From<ReportGroupByArg> for ReportGroupBy {
+    fn from(value: ReportGroupByArg) -> Self {
+        match value {
+            ReportGroupByArg::Day => ReportGroupBy::Day,
+            ReportGroupByArg::Week => ReportGroupBy::Week,
+            ReportGroupByArg::Month => ReportGroupBy::Month,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -480,6 +671,32 @@ fn resolve_milestone_target(
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
+enum ShellArg {
+    #[value(name = "bash")]
+    Bash,
+    #[value(name = "zsh")]
+    Zsh,
+    #[value(name = "fish")]
+    Fish,
+    #[value(name = "powershell")]
+    PowerShell,
+    #[value(name = "elvish")]
+    Elvish,
+}
+
+impl From<ShellArg> for Shell {
+    fn from(value: ShellArg) -> Self {
+        match value {
+            ShellArg::Bash => Shell::Bash,
+            ShellArg::Zsh => Shell::Zsh,
+            ShellArg::Fish => Shell::Fish,
+            ShellArg::PowerShell => Shell::PowerShell,
+            ShellArg::Elvish => Shell::Elvish,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
 enum RelationTypeArg {
     #[value(name = "blocks")]
     Blocks,
@@ -516,6 +733,8 @@ enum ArtifactTypeArg {
     Url,
     #[value(name = "commit")]
     Commit,
+    #[value(name = "pr", alias = "pull-request")]
+    Pr,
 }
 
 impl From<ArtifactTypeArg> for ArtifactType {
@@ -524,6 +743,7 @@ impl From<ArtifactTypeArg> for ArtifactType {
             ArtifactTypeArg::File => ArtifactType::File,
             ArtifactTypeArg::Url => ArtifactType::Url,
             ArtifactTypeArg::Commit => ArtifactType::Commit,
+            ArtifactTypeArg::Pr => ArtifactType::Pr,
         }
     }
 }
@@ -575,12 +795,16 @@ fn run(mut cli: Cli) -> Result<()> {
             "interactive mode requires a TTY; pass --non-interactive or a command",
         ));
     }
-    tui::run_tui(cli.no_color)
+    tui::run_tui(cli.no_color, cli.project.as_deref())
 }
 
 fn run_command(cli: &Cli, command: Commands) -> Result<()> {
     match command {
-        Commands::Init { path } => {
+        Commands::Init {
+            path,
+            setup_claude,
+            no_claude,
+        } => {
             let root = resolve_root(path)?;
             let repo = Repo::init(&root, env!("CARGO_PKG_VERSION"))?;
             let status = repo.status()?;
@@ -588,28 +812,69 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 let config = tik_core::Config::default();
                 let format = resolve_output_format(cli.format, Some(&config))?;
                 let pager = resolve_pager_mode(Some(&config))?;
-                print_output(format, cli.no_color, pager, &render_status(format, &status)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_status(format, &status)?,
+                )?;
+            }
+
+            // Handle Claude Code integration setup
+            let should_setup = if setup_claude {
+                true
+            } else if no_claude || cli.non_interactive {
+                false
+            } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                // Interactive prompt if both stdin and stdout are TTY
+                println!(); // Add newline for spacing
+                Confirm::new()
+                    .with_prompt("Set up Claude Code integration? (creates .claude/skills/tiketer.md + CLAUDE.md)")
+                    .default(true)
+                    .interact()
+                    .unwrap_or(false)
+            } else {
+                // Non-TTY: default to setting up Claude integration
+                true
+            };
+
+            if should_setup {
+                let result = setup_claude_integration(&root)?;
+                if !cli.quiet {
+                    println!("{}", result.summary());
+                    println!("AI agent integration ready (Claude Code, Codex). Use --actor \"agent:<name>\" --format json.");
+                }
             }
         }
         Commands::Status { path } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let status = repo.status()?;
             if !cli.quiet {
                 let config = repo.config_show()?;
                 let format = resolve_output_format(cli.format, Some(&config))?;
                 let pager = resolve_pager_mode(Some(&config))?;
-                print_output(format, cli.no_color, pager, &render_status(format, &status)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_status(format, &status)?,
+                )?;
             }
         }
         Commands::Config { command, path } => {
-            let mut repo = resolve_repo(path)?;
+            let mut repo = resolve_repo(path, cli.project.as_deref())?;
             match command {
                 ConfigCommand::Show => {
                     let config = repo.config_show()?;
                     if !cli.quiet {
                         let format = resolve_output_format(cli.format, Some(&config))?;
                         let pager = resolve_pager_mode(Some(&config))?;
-                        print_output(format, cli.no_color, pager, &render_config(format, &config)?)?;
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_config(format, &config)?,
+                        )?;
                     }
                 }
                 ConfigCommand::Get { key } => {
@@ -627,13 +892,102 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                     if !cli.quiet {
                         let format = resolve_output_format(cli.format, Some(&config))?;
                         let pager = resolve_pager_mode(Some(&config))?;
-                        print_output(format, cli.no_color, pager, &render_config(format, &config)?)?;
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_config(format, &config)?,
+                        )?;
+                    }
+                }
+                ConfigCommand::Bootstrap => {
+                    let config = run_config_bootstrap(cli, &mut repo)?;
+                    if !cli.quiet {
+                        let format = resolve_output_format(cli.format, Some(&config))?;
+                        let pager = resolve_pager_mode(Some(&config))?;
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_config(format, &config)?,
+                        )?;
                     }
                 }
             }
         }
+        Commands::Project { command, path } => {
+            let mut repo = resolve_repo(path, None)?;
+            let config = repo.config_show()?;
+            let format = resolve_output_format(cli.format, Some(&config))?;
+            let pager = resolve_pager_mode(Some(&config))?;
+            match command {
+                ProjectCommand::Init { name, description } => {
+                    let project = repo.project_init(&name, description.as_deref())?;
+                    if !cli.quiet {
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_project(format, &project)?,
+                        )?;
+                    }
+                }
+                ProjectCommand::List => {
+                    let projects = repo.project_list()?;
+                    if !cli.quiet {
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_project_list(format, &projects)?,
+                        )?;
+                    }
+                }
+                ProjectCommand::Select { name } => {
+                    let project = repo.project_select(&name)?;
+                    if !cli.quiet {
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_project(format, &project)?,
+                        )?;
+                    }
+                }
+            }
+        }
+        Commands::Doctor { all_projects, path } => {
+            let repo = resolve_repo(path, cli.project.as_deref())?;
+            let config = repo.config_show()?;
+            let format = resolve_output_format(cli.format, Some(&config))?;
+            let pager = resolve_pager_mode(Some(&config))?;
+            let report = repo.doctor(all_projects)?;
+            if !cli.quiet {
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_doctor(format, &report)?,
+                )?;
+            }
+        }
+        Commands::Migrate { path } => {
+            let mut repo = resolve_repo(path, None)?;
+            let summary = repo.migrate()?;
+            let config = repo.config_show()?;
+            let format = resolve_output_format(cli.format, Some(&config))?;
+            let pager = resolve_pager_mode(Some(&config))?;
+            if !cli.quiet {
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_migration_summary(format, &summary)?,
+                )?;
+            }
+        }
         Commands::Milestone { command, path } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -730,7 +1084,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             }
         }
         Commands::Index { command, path } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -746,6 +1100,17 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                         )?;
                     }
                 }
+                IndexCommand::Status => {
+                    let status = repo.index_status()?;
+                    if !cli.quiet {
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_index_status(format, &status)?,
+                        )?;
+                    }
+                }
             }
         }
         Commands::Search {
@@ -753,17 +1118,23 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             limit,
             offset,
             all,
+            sort,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
             let raw_query = query.join(" ");
             let query = SearchQuery::parse(&raw_query)?;
-            let (offset, limit) =
-                resolve_pagination(all, limit, offset, DEFAULT_PAGE_SIZE)?;
-            let tickets = repo.search_page(&query, offset, limit)?;
+            let (offset, limit) = resolve_pagination(all, limit, offset, DEFAULT_PAGE_SIZE)?;
+            let tickets = if let Some(sort) = sort {
+                let mut tickets = repo.search(&query)?;
+                sort_tickets(&mut tickets, TicketSort::from(sort));
+                apply_pagination(tickets, offset, limit)
+            } else {
+                repo.search_page(&query, offset, limit)?
+            };
             if !cli.quiet {
                 print_output(
                     format,
@@ -773,49 +1144,114 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 )?;
             }
         }
-        Commands::Stats { path } => {
-            let repo = resolve_repo(path)?;
+        Commands::Stats {
+            status,
+            tag,
+            assignee,
+            milestone,
+            since,
+            until,
+            path,
+        } => {
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
-            let stats = repo.stats()?;
+            let filters = build_report_filters(status, tag, assignee, milestone, since, until)?;
+            let stats = repo.stats_filtered(&filters)?;
             if !cli.quiet {
-                print_output(
-                    format,
-                    cli.no_color,
-                    pager,
-                    &render_stats(format, &stats)?,
-                )?;
+                print_output(format, cli.no_color, pager, &render_stats(format, &stats)?)?;
             }
         }
-        Commands::Report { limit, path } => {
-            let repo = resolve_repo(path)?;
+        Commands::Report {
+            limit,
+            sort,
+            metric,
+            group_by,
+            status,
+            tag,
+            assignee,
+            milestone,
+            since,
+            until,
+            path,
+        } => {
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
-            let report = repo.report(limit)?;
-            if !cli.quiet {
-                print_output(
-                    format,
-                    cli.no_color,
-                    pager,
-                    &render_report(format, &report)?,
-                )?;
+            let filters = build_report_filters(status, tag, assignee, milestone, since, until)?;
+            match metric {
+                ReportMetricArg::Summary => {
+                    let sort = sort.map(TicketSort::from).unwrap_or(TicketSort::Updated);
+                    let report = repo.report_filtered_sorted(limit, sort, &filters)?;
+                    if !cli.quiet {
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_report(format, &report)?,
+                        )?;
+                    }
+                }
+                ReportMetricArg::Burndown => {
+                    if sort.is_some() {
+                        return Err(TikError::usage(
+                            "--sort is only supported with --metric summary",
+                        ));
+                    }
+                    let report = repo.burndown(&filters, ReportGroupBy::from(group_by))?;
+                    if !cli.quiet {
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_burndown(format, &report)?,
+                        )?;
+                    }
+                }
+                ReportMetricArg::Throughput => {
+                    if sort.is_some() {
+                        return Err(TikError::usage(
+                            "--sort is only supported with --metric summary",
+                        ));
+                    }
+                    let report = repo.throughput(&filters, ReportGroupBy::from(group_by))?;
+                    if !cli.quiet {
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_throughput(format, &report)?,
+                        )?;
+                    }
+                }
             }
         }
-        Commands::Graph { path } => {
-            let repo = resolve_repo(path)?;
+        Commands::Graph {
+            root,
+            depth,
+            relation,
+            include_milestones,
+            dot,
+            path,
+        } => {
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
-            let graph = repo.graph()?;
+            if dot && cli.format.is_some() {
+                return Err(TikError::usage("--dot cannot be combined with --format"));
+            }
+            let options =
+                build_graph_options(root, depth, relation, include_milestones)?;
+            let graph = repo.graph_with_options(&options)?;
             if !cli.quiet {
-                print_output(
-                    format,
-                    cli.no_color,
-                    pager,
-                    &render_graph(format, &graph)?,
-                )?;
+                if dot {
+                    print_output(format, cli.no_color, pager, &render_graph_dot(&graph))?;
+                } else {
+                    print_output(format, cli.no_color, pager, &render_graph(format, &graph)?)?;
+                }
             }
         }
         Commands::Export {
@@ -823,7 +1259,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             output,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -844,7 +1280,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -870,7 +1306,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -885,18 +1321,28 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 &actor,
             )?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Show { id, path } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
             let ticket_id = TicketId::parse(&id)?;
             let ticket = repo.load_ticket(&ticket_id)?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::List {
@@ -904,16 +1350,22 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             limit,
             offset,
             all,
+            sort,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
             let filter = status.map(TicketStatus::from);
-            let (offset, limit) =
-                resolve_pagination(all, limit, offset, DEFAULT_PAGE_SIZE)?;
-            let tickets = repo.list_tickets_page(filter, offset, limit)?;
+            let (offset, limit) = resolve_pagination(all, limit, offset, DEFAULT_PAGE_SIZE)?;
+            let tickets = if let Some(sort) = sort {
+                let mut tickets = repo.list_tickets(filter.clone())?;
+                sort_tickets(&mut tickets, TicketSort::from(sort));
+                apply_pagination(tickets, offset, limit)
+            } else {
+                repo.list_tickets_page(filter, offset, limit)?
+            };
             if !cli.quiet {
                 print_output(
                     format,
@@ -929,7 +1381,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -947,7 +1399,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -966,7 +1418,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 let edited = edit_text_with_editor(&raw)?;
                 let ticket = repo.apply_edit(&ticket_id, &edited, &actor, reason.as_deref())?;
                 if !cli.quiet {
-                    print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                    print_output(
+                        format,
+                        cli.no_color,
+                        pager,
+                        &render_ticket(format, &ticket)?,
+                    )?;
                 }
             }
         }
@@ -980,7 +1437,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1002,7 +1459,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 }
             };
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Tag {
@@ -1015,7 +1477,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1037,7 +1499,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 }
             };
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Relate {
@@ -1048,7 +1515,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1063,7 +1530,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 reason.as_deref(),
             )?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Unrelate {
@@ -1074,7 +1546,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1089,7 +1561,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 reason.as_deref(),
             )?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Link {
@@ -1100,7 +1577,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1114,7 +1591,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 reason.as_deref(),
             )?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Unlink {
@@ -1125,7 +1607,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1139,7 +1621,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 reason.as_deref(),
             )?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Close {
@@ -1148,7 +1635,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1157,7 +1644,12 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             let ticket =
                 repo.update_status(&ticket_id, TicketStatus::Closed, &actor, reason.as_deref())?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Reopen {
@@ -1166,7 +1658,7 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             actor,
             path,
         } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1175,11 +1667,16 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             let ticket =
                 repo.update_status(&ticket_id, TicketStatus::Open, &actor, reason.as_deref())?;
             if !cli.quiet {
-                print_output(format, cli.no_color, pager, &render_ticket(format, &ticket)?)?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
+                )?;
             }
         }
         Commands::Log { id, path } => {
-            let repo = resolve_repo(path)?;
+            let repo = resolve_repo(path, cli.project.as_deref())?;
             let config = repo.config_show()?;
             let format = resolve_output_format(cli.format, Some(&config))?;
             let pager = resolve_pager_mode(Some(&config))?;
@@ -1191,6 +1688,81 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                     cli.no_color,
                     pager,
                     &render_event_list(format, &events)?,
+                )?;
+            }
+        }
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            generate(Shell::from(shell), &mut cmd, "tik", &mut std::io::stdout());
+        }
+        Commands::Backup { output, path } => {
+            let repo = resolve_repo(path, cli.project.as_deref())?;
+            let config = repo.config_show()?;
+            let format = resolve_output_format(cli.format, Some(&config))?;
+            let pager = resolve_pager_mode(Some(&config))?;
+            let summary = repo.backup(&output)?;
+            if !cli.quiet {
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_backup_summary(format, &summary)?,
+                )?;
+            }
+        }
+        Commands::Restore { input, path } => {
+            let root = resolve_root(path)?;
+            let summary = tik_core::Repo::restore(&root, &input)?;
+            if !cli.quiet {
+                let config = tik_core::Config::default();
+                let format = resolve_output_format(cli.format, Some(&config))?;
+                let pager = resolve_pager_mode(Some(&config))?;
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_restore_summary(format, &summary)?,
+                )?;
+            }
+        }
+        Commands::DataMigrate {
+            dry_run,
+            to_version,
+            path,
+        } => {
+            let repo = resolve_repo(path, cli.project.as_deref())?;
+            let config = repo.config_show()?;
+            let format = resolve_output_format(cli.format, Some(&config))?;
+            let pager = resolve_pager_mode(Some(&config))?;
+            let report = repo.run_data_migrations(to_version.as_deref(), dry_run)?;
+            if !cli.quiet {
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_data_migration_report(format, &report, dry_run)?,
+                )?;
+            }
+        }
+        Commands::Accept {
+            id,
+            index,
+            actor,
+            path,
+        } => {
+            let repo = resolve_repo(path, cli.project.as_deref())?;
+            let config = repo.config_show()?;
+            let format = resolve_output_format(cli.format, Some(&config))?;
+            let pager = resolve_pager_mode(Some(&config))?;
+            let actor = resolve_actor(actor);
+            let ticket_id = TicketId::parse(&id)?;
+            let ticket = repo.toggle_acceptance(&ticket_id, index, &actor)?;
+            if !cli.quiet {
+                print_output(
+                    format,
+                    cli.no_color,
+                    pager,
+                    &render_ticket(format, &ticket)?,
                 )?;
             }
         }
@@ -1206,9 +1778,9 @@ fn resolve_root(path: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn resolve_repo(path: Option<PathBuf>) -> Result<Repo> {
+fn resolve_repo(path: Option<PathBuf>, project: Option<&str>) -> Result<Repo> {
     let root = resolve_root(path)?;
-    Repo::discover(&root)
+    Repo::discover_with_project(&root, project)
 }
 
 fn resolve_output_format(
@@ -1231,6 +1803,127 @@ fn resolve_pager_mode(config: Option<&tik_core::Config>) -> Result<PagerMode> {
     Ok(PagerMode::Auto)
 }
 
+fn run_config_bootstrap(cli: &Cli, repo: &mut Repo) -> Result<tik_core::Config> {
+    if cli.non_interactive {
+        return Err(TikError::usage(
+            "config bootstrap requires a TTY; use `tik config set` instead",
+        ));
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(TikError::usage(
+            "config bootstrap requires a TTY; use `tik config set` instead",
+        ));
+    }
+
+    let mut config = repo.config_show()?;
+    println!("Config bootstrap (Enter to keep current, '-' to clear a list)");
+
+    if let Some(values) = prompt_optional_list("Allowed ticket types", &config.ticket_types)? {
+        config.ticket_types = values;
+    }
+    if let Some(values) =
+        prompt_optional_list("Allowed ticket priorities", &config.ticket_priorities)?
+    {
+        config.ticket_priorities = values;
+    }
+    if let Some(values) =
+        prompt_optional_list("Allowed ticket severities", &config.ticket_severities)?
+    {
+        config.ticket_severities = values;
+    }
+    if let Some(values) = prompt_optional_list("Allowed ticket statuses", &config.ticket_statuses)?
+    {
+        config.ticket_statuses = values;
+    }
+    if let Some(values) = prompt_optional_list(
+        "Allowed ticket estimate units",
+        &config.ticket_estimate_units,
+    )? {
+        config.ticket_estimate_units = values;
+    }
+    if let Some(values) = prompt_optional_list("Allowed ticket tags", &config.ticket_tags)? {
+        config.ticket_tags = values;
+    }
+    if let Some(values) =
+        prompt_optional_list("Allowed ticket assignees", &config.ticket_assignees)?
+    {
+        config.ticket_assignees = values;
+    }
+
+    if let Some(value) =
+        prompt_optional_value("Default ticket type", &config.ticket_default_type)?
+    {
+        config.ticket_default_type = value;
+    }
+    if let Some(value) = prompt_optional_value(
+        "Default ticket priority",
+        &config.ticket_default_priority,
+    )? {
+        config.ticket_default_priority = value;
+    }
+    if let Some(value) = prompt_optional_value(
+        "Default ticket severity",
+        &config.ticket_default_severity,
+    )? {
+        config.ticket_default_severity = value;
+    }
+
+    repo.config_replace(config)
+}
+
+fn prompt_optional_list(label: &str, current: &[String]) -> Result<Option<Vec<String>>> {
+    let current_value = if current.is_empty() {
+        "any".to_string()
+    } else {
+        current.join(", ")
+    };
+    let prompt = format!("{label} [{current_value}]: ");
+    let input = prompt_line(&prompt)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed == "-" {
+        return Ok(Some(Vec::new()));
+    }
+    Ok(Some(parse_csv_list_input(trimmed)))
+}
+
+fn prompt_optional_value(label: &str, current: &str) -> Result<Option<String>> {
+    let prompt = format!("{label} [{current}]: ");
+    let input = prompt_line(&prompt)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    use std::io::{self, Write};
+
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(prompt.as_bytes())
+        .map_err(|err| TikError::io("write prompt", err))?;
+    stdout
+        .flush()
+        .map_err(|err| TikError::io("flush prompt", err))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|err| TikError::io("read prompt", err))?;
+    Ok(input)
+}
+
+fn parse_csv_list_input(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .collect()
+}
+
 fn resolve_pagination(
     all: bool,
     limit: Option<usize>,
@@ -1248,6 +1941,72 @@ fn resolve_pagination(
         Some(limit.unwrap_or(default_limit))
     };
     Ok((offset, limit))
+}
+
+fn apply_pagination<T>(items: Vec<T>, offset: usize, limit: Option<usize>) -> Vec<T> {
+    let iter = items.into_iter().skip(offset);
+    match limit {
+        Some(limit) => iter.take(limit).collect(),
+        None => iter.collect(),
+    }
+}
+
+fn build_report_filters(
+    status: Vec<TicketStatusArg>,
+    tag: Vec<String>,
+    assignee: Vec<String>,
+    milestone: Vec<String>,
+    since: Option<String>,
+    until: Option<String>,
+) -> Result<ReportFilters> {
+    let status_values = status
+        .into_iter()
+        .map(|value| TicketStatus::from(value).as_str().to_string())
+        .collect::<Vec<_>>();
+    let mut milestone_values = Vec::new();
+    for value in milestone {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(TikError::usage("milestone filter cannot be empty"));
+        }
+        let id = MilestoneId::parse(trimmed)
+            .map_err(|_| TikError::usage(&format!("invalid milestone id: {trimmed}")))?;
+        milestone_values.push(id.as_str().to_string());
+    }
+
+    ReportFilters::parse(
+        status_values,
+        tag,
+        assignee,
+        milestone_values,
+        since.as_deref(),
+        until.as_deref(),
+    )
+}
+
+fn build_graph_options(
+    root: Vec<String>,
+    depth: Option<usize>,
+    relation: Vec<RelationTypeArg>,
+    include_milestones: bool,
+) -> Result<GraphOptions> {
+    let mut roots = Vec::new();
+    for value in root {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(TikError::usage("root id cannot be empty"));
+        }
+        let id = TicketId::parse(trimmed)
+            .map_err(|_| TikError::usage(&format!("invalid root ticket id: {trimmed}")))?;
+        roots.push(id);
+    }
+    let relations = relation.into_iter().map(RelationType::from).collect();
+    Ok(GraphOptions {
+        roots,
+        depth,
+        relations,
+        include_milestones,
+    })
 }
 
 fn resolve_actor(actor: Option<String>) -> String {
@@ -1349,8 +2108,11 @@ fn render_export_csv(bundle: &ExportBundle, scope: ExportScopeArg) -> Result<Str
             render_ticket_list_csv(&tickets)
         }
         ExportScopeArg::Milestones => {
-            let milestones: Vec<Milestone> =
-                bundle.milestones.iter().map(|m| m.milestone.clone()).collect();
+            let milestones: Vec<Milestone> = bundle
+                .milestones
+                .iter()
+                .map(|m| m.milestone.clone())
+                .collect();
             render_milestone_list_csv(&milestones)
         }
     }
@@ -1457,7 +2219,12 @@ fn write_output_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_output(_format: OutputFormat, no_color: bool, pager: PagerMode, output: &str) -> Result<()> {
+fn print_output(
+    _format: OutputFormat,
+    no_color: bool,
+    pager: PagerMode,
+    output: &str,
+) -> Result<()> {
     if no_color {
         console::set_colors_enabled(false);
     }
@@ -1488,9 +2255,9 @@ fn open_in_editor(path: &Path) -> Result<()> {
     if parts.is_empty() {
         return Err(TikError::ExternalCommand("EDITOR is empty".to_string()));
     }
-    let (cmd, args) = parts.split_first().ok_or_else(|| {
-        TikError::ExternalCommand("EDITOR command missing".to_string())
-    })?;
+    let (cmd, args) = parts
+        .split_first()
+        .ok_or_else(|| TikError::ExternalCommand("EDITOR command missing".to_string()))?;
     let status = std::process::Command::new(cmd)
         .args(args)
         .arg(path)
@@ -1505,8 +2272,8 @@ fn open_in_editor(path: &Path) -> Result<()> {
 }
 
 fn edit_text_with_editor(raw: &str) -> Result<String> {
-    let mut temp = tempfile::NamedTempFile::new()
-        .map_err(|err| TikError::io("create temp file", err))?;
+    let mut temp =
+        tempfile::NamedTempFile::new().map_err(|err| TikError::io("create temp file", err))?;
     use std::io::Write;
     temp.write_all(raw.as_bytes())
         .map_err(|err| TikError::io("write temp file", err))?;
@@ -1515,8 +2282,8 @@ fn edit_text_with_editor(raw: &str) -> Result<String> {
 
     open_in_editor(temp.path())?;
 
-    let edited =
-        std::fs::read_to_string(temp.path()).map_err(|err| TikError::io("read edited text", err))?;
+    let edited = std::fs::read_to_string(temp.path())
+        .map_err(|err| TikError::io("read edited text", err))?;
     Ok(edited)
 }
 
@@ -1532,6 +2299,230 @@ fn render_status(format: OutputFormat, status: &RepoStatus) -> Result<String> {
             .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
         OutputFormat::Md => Ok(render_status_md(status)),
         OutputFormat::Csv => render_status_csv(status),
+    }
+}
+
+fn render_doctor(format: OutputFormat, report: &DoctorReport) -> Result<String> {
+    match format {
+        OutputFormat::Table => render_doctor_table(report),
+        OutputFormat::Compact => Ok(render_doctor_compact(report)),
+        OutputFormat::Json => serde_json::to_string_pretty(report)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => serde_json::to_string(report)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}"))),
+        OutputFormat::Yaml => serde_yaml::to_string(report)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(render_doctor_md(report)),
+        OutputFormat::Csv => render_doctor_csv(report),
+    }
+}
+
+fn render_migration_summary(format: OutputFormat, summary: &MigrationSummary) -> Result<String> {
+    match format {
+        OutputFormat::Table => render_migration_summary_table(summary),
+        OutputFormat::Compact => Ok(render_migration_summary_compact(summary)),
+        OutputFormat::Json => serde_json::to_string_pretty(summary)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => serde_json::to_string(summary)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}"))),
+        OutputFormat::Yaml => serde_yaml::to_string(summary)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(render_migration_summary_md(summary)),
+        OutputFormat::Csv => render_migration_summary_csv(summary),
+    }
+}
+
+fn render_index_status(format: OutputFormat, status: &IndexStatus) -> Result<String> {
+    match format {
+        OutputFormat::Table => render_index_status_table(status),
+        OutputFormat::Compact => Ok(render_index_status_compact(status)),
+        OutputFormat::Json => serde_json::to_string_pretty(status)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => serde_json::to_string(status)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}"))),
+        OutputFormat::Yaml => serde_yaml::to_string(status)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(render_index_status_md(status)),
+        OutputFormat::Csv => render_index_status_csv(status),
+    }
+}
+
+fn render_backup_summary(format: OutputFormat, summary: &BackupSummary) -> Result<String> {
+    match format {
+        OutputFormat::Table | OutputFormat::Compact => {
+            Ok(format!(
+                "Backup completed: {} tickets, {} milestones to {}\nStarted: {}\nCompleted: {}",
+                summary.tickets_count,
+                summary.milestones_count,
+                summary.output_path,
+                summary.started_at,
+                summary.completed_at
+            ))
+        }
+        OutputFormat::Json => serde_json::to_string_pretty(summary)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => serde_json::to_string(summary)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}"))),
+        OutputFormat::Yaml => serde_yaml::to_string(summary)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(format!(
+            "# Backup Summary\n\n- Output: {}\n- Tickets: {}\n- Milestones: {}\n- Started: {}\n- Completed: {}",
+            summary.output_path,
+            summary.tickets_count,
+            summary.milestones_count,
+            summary.started_at,
+            summary.completed_at
+        )),
+        OutputFormat::Csv => {
+            csv_write(
+                &["output_path", "tickets_count", "milestones_count", "started_at", "completed_at"],
+                vec![vec![
+                    summary.output_path.clone(),
+                    summary.tickets_count.to_string(),
+                    summary.milestones_count.to_string(),
+                    summary.started_at.clone(),
+                    summary.completed_at.clone(),
+                ]],
+            )
+        }
+    }
+}
+
+fn render_restore_summary(format: OutputFormat, summary: &RestoreSummary) -> Result<String> {
+    match format {
+        OutputFormat::Table | OutputFormat::Compact => {
+            Ok(format!(
+                "Restore completed: {} tickets, {} milestones from {}\nStarted: {}\nCompleted: {}",
+                summary.tickets_count,
+                summary.milestones_count,
+                summary.input_path,
+                summary.started_at,
+                summary.completed_at
+            ))
+        }
+        OutputFormat::Json => serde_json::to_string_pretty(summary)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => serde_json::to_string(summary)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}"))),
+        OutputFormat::Yaml => serde_yaml::to_string(summary)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(format!(
+            "# Restore Summary\n\n- Input: {}\n- Tickets: {}\n- Milestones: {}\n- Started: {}\n- Completed: {}",
+            summary.input_path,
+            summary.tickets_count,
+            summary.milestones_count,
+            summary.started_at,
+            summary.completed_at
+        )),
+        OutputFormat::Csv => {
+            csv_write(
+                &["input_path", "tickets_count", "milestones_count", "started_at", "completed_at"],
+                vec![vec![
+                    summary.input_path.clone(),
+                    summary.tickets_count.to_string(),
+                    summary.milestones_count.to_string(),
+                    summary.started_at.clone(),
+                    summary.completed_at.clone(),
+                ]],
+            )
+        }
+    }
+}
+
+fn render_data_migration_report(
+    format: OutputFormat,
+    report: &DataMigrationReport,
+    dry_run: bool,
+) -> Result<String> {
+    match format {
+        OutputFormat::Table | OutputFormat::Compact => {
+            let status = if dry_run { " (dry run)" } else { "" };
+            let mut out = format!(
+                "Data migration{}: {} -> {}\nStarted: {}\nCompleted: {}\nSuccess: {}\n",
+                status,
+                report.from_version,
+                report.to_version,
+                report.started_at,
+                report.completed_at.as_deref().unwrap_or("-"),
+                report.success
+            );
+            out.push_str(&format!(
+                "Total: {} tickets, {} milestones, {} events\n",
+                report.total_tickets, report.total_milestones, report.total_events
+            ));
+            if !report.all_warnings.is_empty() {
+                out.push_str(&format!("Warnings: {}\n", report.all_warnings.len()));
+                for w in &report.all_warnings {
+                    out.push_str(&format!("  - {w}\n"));
+                }
+            }
+            if !report.all_errors.is_empty() {
+                out.push_str(&format!("Errors: {}\n", report.all_errors.len()));
+                for e in &report.all_errors {
+                    out.push_str(&format!("  - {e}\n"));
+                }
+            }
+            Ok(out)
+        }
+        OutputFormat::Json => serde_json::to_string_pretty(report)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => serde_json::to_string(report)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}"))),
+        OutputFormat::Yaml => serde_yaml::to_string(report)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => {
+            let status = if dry_run { " (dry run)" } else { "" };
+            let mut out = format!(
+                "# Data Migration Report{}\n\n- From: {}\n- To: {}\n- Success: {}\n\n",
+                status, report.from_version, report.to_version, report.success
+            );
+            out.push_str(&format!(
+                "## Summary\n\n- Tickets: {}\n- Milestones: {}\n- Events: {}\n\n",
+                report.total_tickets, report.total_milestones, report.total_events
+            ));
+            if !report.all_warnings.is_empty() {
+                out.push_str("## Warnings\n\n");
+                for w in &report.all_warnings {
+                    out.push_str(&format!("- {w}\n"));
+                }
+                out.push('\n');
+            }
+            if !report.all_errors.is_empty() {
+                out.push_str("## Errors\n\n");
+                for e in &report.all_errors {
+                    out.push_str(&format!("- {e}\n"));
+                }
+            }
+            Ok(out)
+        }
+        OutputFormat::Csv => {
+            let warnings = serde_json::to_string(&report.all_warnings)
+                .map_err(|err| TikError::internal(&format!("csv warnings json: {err}")))?;
+            let errors = serde_json::to_string(&report.all_errors)
+                .map_err(|err| TikError::internal(&format!("csv errors json: {err}")))?;
+            csv_write(
+                &[
+                    "from_version",
+                    "to_version",
+                    "success",
+                    "total_tickets",
+                    "total_milestones",
+                    "total_events",
+                    "warnings_json",
+                    "errors_json",
+                ],
+                vec![vec![
+                    report.from_version.clone(),
+                    report.to_version.clone(),
+                    report.success.to_string(),
+                    report.total_tickets.to_string(),
+                    report.total_milestones.to_string(),
+                    report.total_events.to_string(),
+                    warnings,
+                    errors,
+                ]],
+            )
+        }
     }
 }
 
@@ -1590,6 +2581,34 @@ fn render_report(format: OutputFormat, report: &Report) -> Result<String> {
             .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
         OutputFormat::Md => Ok(render_report_md(report)),
         OutputFormat::Csv => render_report_csv(report),
+    }
+}
+
+fn render_burndown(format: OutputFormat, report: &BurndownReport) -> Result<String> {
+    match format {
+        OutputFormat::Table => render_burndown_table(report),
+        OutputFormat::Compact => Ok(render_burndown_compact(report)),
+        OutputFormat::Json => serde_json::to_string_pretty(report)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => render_burndown_jsonl(report),
+        OutputFormat::Yaml => serde_yaml::to_string(report)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(render_burndown_md(report)),
+        OutputFormat::Csv => render_burndown_csv(report),
+    }
+}
+
+fn render_throughput(format: OutputFormat, report: &ThroughputReport) -> Result<String> {
+    match format {
+        OutputFormat::Table => render_throughput_table(report),
+        OutputFormat::Compact => Ok(render_throughput_compact(report)),
+        OutputFormat::Json => serde_json::to_string_pretty(report)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => render_throughput_jsonl(report),
+        OutputFormat::Yaml => serde_yaml::to_string(report)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(render_throughput_md(report)),
+        OutputFormat::Csv => render_throughput_csv(report),
     }
 }
 
@@ -1655,6 +2674,35 @@ fn render_config_value(format: OutputFormat, key: &str, value: &str) -> Result<S
                 .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
             String::from_utf8(data).map_err(|err| TikError::internal(&format!("csv utf8: {err}")))
         }
+    }
+}
+
+fn render_project(format: OutputFormat, project: &ProjectMeta) -> Result<String> {
+    match format {
+        OutputFormat::Table => render_project_table(project),
+        OutputFormat::Compact => Ok(render_project_compact(project)),
+        OutputFormat::Json => serde_json::to_string_pretty(project)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => serde_json::to_string(project)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}"))),
+        OutputFormat::Yaml => serde_yaml::to_string(project)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(render_project_md(project)),
+        OutputFormat::Csv => render_project_csv(project),
+    }
+}
+
+fn render_project_list(format: OutputFormat, projects: &[ProjectMeta]) -> Result<String> {
+    match format {
+        OutputFormat::Table => render_project_list_table(projects),
+        OutputFormat::Compact => Ok(render_project_list_compact(projects)),
+        OutputFormat::Json => serde_json::to_string_pretty(projects)
+            .map_err(|err| TikError::internal(&format!("json render: {err}"))),
+        OutputFormat::Jsonl => render_jsonl(projects),
+        OutputFormat::Yaml => serde_yaml::to_string(projects)
+            .map_err(|err| TikError::internal(&format!("yaml render: {err}"))),
+        OutputFormat::Md => Ok(render_project_list_md(projects)),
+        OutputFormat::Csv => render_project_list_csv(projects),
     }
 }
 
@@ -1765,6 +2813,14 @@ fn render_status_table(status: &RepoStatus) -> Result<String> {
             value: status.tik_root.clone(),
         },
         Row {
+            key: "project",
+            value: status.project.clone(),
+        },
+        Row {
+            key: "project_root",
+            value: status.project_root.clone(),
+        },
+        Row {
             key: "schema_version",
             value: status.schema_version.clone(),
         },
@@ -1787,6 +2843,175 @@ fn render_status_table(status: &RepoStatus) -> Result<String> {
         Row {
             key: "milestone_count",
             value: status.milestone_count.to_string(),
+        },
+    ];
+
+    Ok(Table::new(rows).to_string())
+}
+
+fn render_doctor_table(report: &DoctorReport) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        status: String,
+        scope: String,
+        id: String,
+        message: String,
+        details: String,
+        hint: String,
+    }
+
+    let rows: Vec<Row> = report
+        .checks
+        .iter()
+        .map(|check| Row {
+            status: check.status.as_str().to_string(),
+            scope: check.scope.clone(),
+            id: check.id.clone(),
+            message: check.message.clone(),
+            details: check.details.join("; "),
+            hint: check.hint.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(&format!("Generated at: {}\n", report.generated_at));
+    out.push_str(&format!("Repo root: {}\n", report.repo_root));
+    out.push_str(&format!("Layout version: {}\n", report.layout_version));
+    out.push_str(&format!(
+        "Summary: ok={} warnings={} errors={}\n\n",
+        report.summary.ok, report.summary.warnings, report.summary.errors
+    ));
+    out.push_str(&Table::new(rows).to_string());
+    Ok(out)
+}
+
+fn render_migration_summary_table(summary: &MigrationSummary) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        key: &'static str,
+        value: String,
+    }
+
+    let rows = vec![
+        Row {
+            key: "migrated_at",
+            value: summary.migrated_at.clone(),
+        },
+        Row {
+            key: "from_layout",
+            value: summary.from_layout.clone(),
+        },
+        Row {
+            key: "to_layout",
+            value: summary.to_layout.clone(),
+        },
+        Row {
+            key: "project",
+            value: summary.project.clone(),
+        },
+        Row {
+            key: "moves",
+            value: summary.moves.len().to_string(),
+        },
+        Row {
+            key: "created",
+            value: summary.created.len().to_string(),
+        },
+        Row {
+            key: "warnings",
+            value: summary.warnings.len().to_string(),
+        },
+    ];
+
+    let mut out = String::new();
+    out.push_str(&Table::new(rows).to_string());
+    if !summary.moves.is_empty() {
+        out.push_str("\n\nMoves\n");
+        #[derive(Tabled)]
+        struct MoveRow {
+            from: String,
+            to: String,
+        }
+        let move_rows: Vec<MoveRow> = summary
+            .moves
+            .iter()
+            .map(|item| MoveRow {
+                from: item.from.clone(),
+                to: item.to.clone(),
+            })
+            .collect();
+        out.push_str(&Table::new(move_rows).to_string());
+    }
+    if !summary.created.is_empty() {
+        out.push_str("\n\nCreated\n");
+        for path in &summary.created {
+            out.push_str(&format!("- {path}\n"));
+        }
+    }
+    if !summary.warnings.is_empty() {
+        out.push_str("\n\nWarnings\n");
+        for warning in &summary.warnings {
+            out.push_str(&format!("- {warning}\n"));
+        }
+    }
+    Ok(out)
+}
+
+fn render_index_status_table(status: &IndexStatus) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        key: &'static str,
+        value: String,
+    }
+
+    let rows = vec![
+        Row {
+            key: "index_present",
+            value: status.index_present.to_string(),
+        },
+        Row {
+            key: "stale",
+            value: status.stale.to_string(),
+        },
+        Row {
+            key: "indexed_at",
+            value: status.indexed_at.clone().unwrap_or_default(),
+        },
+        Row {
+            key: "ticket_count",
+            value: status
+                .ticket_count
+                .map(|count| count.to_string())
+                .unwrap_or_default(),
+        },
+        Row {
+            key: "last_ticket_write",
+            value: status.last_ticket_write.clone().unwrap_or_default(),
+        },
+        Row {
+            key: "last_milestone_write",
+            value: status.last_milestone_write.clone().unwrap_or_default(),
+        },
+        Row {
+            key: "fts_path",
+            value: status.fts_path.clone(),
+        },
+        Row {
+            key: "tickets_jsonl_path",
+            value: status.tickets_jsonl_path.clone(),
+        },
+        Row {
+            key: "metadata_path",
+            value: status.metadata_path.clone(),
         },
     ];
 
@@ -1880,6 +3105,42 @@ fn render_report_table(report: &Report) -> Result<String> {
     Ok(out)
 }
 
+fn render_burndown_table(report: &BurndownReport) -> Result<String> {
+    let mut out = String::new();
+    out.push_str(&format!("Generated at: {}\n", report.generated_at));
+    out.push_str(&format!(
+        "Range: {} -> {}\n",
+        report.range.since, report.range.until
+    ));
+    out.push_str(&format!(
+        "Group by: {}\n\n",
+        report_group_by_label(report.group_by)
+    ));
+    out.push_str("Filters\n");
+    out.push_str(&render_report_filters_table(&report.filters)?);
+    out.push_str("\n\nBurndown\n");
+    out.push_str(&render_burndown_points_table(&report.points)?);
+    Ok(out)
+}
+
+fn render_throughput_table(report: &ThroughputReport) -> Result<String> {
+    let mut out = String::new();
+    out.push_str(&format!("Generated at: {}\n", report.generated_at));
+    out.push_str(&format!(
+        "Range: {} -> {}\n",
+        report.range.since, report.range.until
+    ));
+    out.push_str(&format!(
+        "Group by: {}\n\n",
+        report_group_by_label(report.group_by)
+    ));
+    out.push_str("Filters\n");
+    out.push_str(&render_report_filters_table(&report.filters)?);
+    out.push_str("\n\nThroughput\n");
+    out.push_str(&render_throughput_points_table(&report.points)?);
+    Ok(out)
+}
+
 fn render_graph_table(graph: &Graph) -> Result<String> {
     let mut out = String::new();
     out.push_str("Nodes\n");
@@ -1916,6 +3177,46 @@ fn render_config_table(config: &tik_core::Config) -> Result<String> {
             key: "timezone",
             value: config.timezone.clone(),
         },
+        Row {
+            key: "ticket_default_type",
+            value: config.ticket_default_type.clone(),
+        },
+        Row {
+            key: "ticket_default_priority",
+            value: config.ticket_default_priority.clone(),
+        },
+        Row {
+            key: "ticket_default_severity",
+            value: config.ticket_default_severity.clone(),
+        },
+        Row {
+            key: "ticket_types",
+            value: format_config_list(&config.ticket_types),
+        },
+        Row {
+            key: "ticket_priorities",
+            value: format_config_list(&config.ticket_priorities),
+        },
+        Row {
+            key: "ticket_severities",
+            value: format_config_list(&config.ticket_severities),
+        },
+        Row {
+            key: "ticket_statuses",
+            value: format_config_list(&config.ticket_statuses),
+        },
+        Row {
+            key: "ticket_estimate_units",
+            value: format_config_list(&config.ticket_estimate_units),
+        },
+        Row {
+            key: "ticket_tags",
+            value: format_config_list(&config.ticket_tags),
+        },
+        Row {
+            key: "ticket_assignees",
+            value: format_config_list(&config.ticket_assignees),
+        },
     ];
 
     Ok(Table::new(rows).to_string())
@@ -1923,8 +3224,21 @@ fn render_config_table(config: &tik_core::Config) -> Result<String> {
 
 fn render_config_compact(config: &tik_core::Config) -> String {
     format!(
-        "schema_version={} output_format={} pager={} timezone={}",
-        config.schema_version, config.output_format, config.pager, config.timezone
+        "schema_version={} output_format={} pager={} timezone={} ticket_default_type={} ticket_default_priority={} ticket_default_severity={} ticket_types={} ticket_priorities={} ticket_severities={} ticket_statuses={} ticket_estimate_units={} ticket_tags={} ticket_assignees={}",
+        config.schema_version,
+        config.output_format,
+        config.pager,
+        config.timezone,
+        config.ticket_default_type,
+        config.ticket_default_priority,
+        config.ticket_default_severity,
+        format_config_list(&config.ticket_types),
+        format_config_list(&config.ticket_priorities),
+        format_config_list(&config.ticket_severities),
+        format_config_list(&config.ticket_statuses),
+        format_config_list(&config.ticket_estimate_units),
+        format_config_list(&config.ticket_tags),
+        format_config_list(&config.ticket_assignees)
     )
 }
 
@@ -1936,26 +3250,111 @@ fn render_config_md(config: &tik_core::Config) -> String {
     out.push_str(&format!("| output_format | {} |\n", config.output_format));
     out.push_str(&format!("| pager | {} |\n", config.pager));
     out.push_str(&format!("| timezone | {} |\n", config.timezone));
+    out.push_str(&format!(
+        "| ticket_default_type | {} |\n",
+        config.ticket_default_type
+    ));
+    out.push_str(&format!(
+        "| ticket_default_priority | {} |\n",
+        config.ticket_default_priority
+    ));
+    out.push_str(&format!(
+        "| ticket_default_severity | {} |\n",
+        config.ticket_default_severity
+    ));
+    out.push_str(&format!(
+        "| ticket_types | {} |\n",
+        format_config_list(&config.ticket_types)
+    ));
+    out.push_str(&format!(
+        "| ticket_priorities | {} |\n",
+        format_config_list(&config.ticket_priorities)
+    ));
+    out.push_str(&format!(
+        "| ticket_severities | {} |\n",
+        format_config_list(&config.ticket_severities)
+    ));
+    out.push_str(&format!(
+        "| ticket_statuses | {} |\n",
+        format_config_list(&config.ticket_statuses)
+    ));
+    out.push_str(&format!(
+        "| ticket_estimate_units | {} |\n",
+        format_config_list(&config.ticket_estimate_units)
+    ));
+    out.push_str(&format!(
+        "| ticket_tags | {} |\n",
+        format_config_list(&config.ticket_tags)
+    ));
+    out.push_str(&format!(
+        "| ticket_assignees | {} |\n",
+        format_config_list(&config.ticket_assignees)
+    ));
     out
 }
 
 fn render_config_csv(config: &tik_core::Config) -> Result<String> {
     let mut writer = csv::Writer::from_writer(vec![]);
     writer
-        .write_record(["schema_version", "output_format", "pager", "timezone"])
+        .write_record([
+            "schema_version",
+            "output_format",
+            "pager",
+            "timezone",
+            "ticket_default_type",
+            "ticket_default_priority",
+            "ticket_default_severity",
+            "ticket_types",
+            "ticket_priorities",
+            "ticket_severities",
+            "ticket_statuses",
+            "ticket_estimate_units",
+            "ticket_tags",
+            "ticket_assignees",
+        ])
         .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    let ticket_types = format_config_list_csv(&config.ticket_types);
+    let ticket_priorities = format_config_list_csv(&config.ticket_priorities);
+    let ticket_severities = format_config_list_csv(&config.ticket_severities);
+    let ticket_statuses = format_config_list_csv(&config.ticket_statuses);
+    let ticket_estimate_units = format_config_list_csv(&config.ticket_estimate_units);
+    let ticket_tags = format_config_list_csv(&config.ticket_tags);
+    let ticket_assignees = format_config_list_csv(&config.ticket_assignees);
+
     writer
         .write_record([
             config.schema_version.as_str(),
             config.output_format.as_str(),
             config.pager.as_str(),
             config.timezone.as_str(),
+            config.ticket_default_type.as_str(),
+            config.ticket_default_priority.as_str(),
+            config.ticket_default_severity.as_str(),
+            ticket_types.as_str(),
+            ticket_priorities.as_str(),
+            ticket_severities.as_str(),
+            ticket_statuses.as_str(),
+            ticket_estimate_units.as_str(),
+            ticket_tags.as_str(),
+            ticket_assignees.as_str(),
         ])
         .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
     let data = writer
         .into_inner()
         .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
     String::from_utf8(data).map_err(|err| TikError::internal(&format!("csv utf8: {err}")))
+}
+
+fn format_config_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "any".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn format_config_list_csv(values: &[String]) -> String {
+    values.join(",")
 }
 
 fn render_config_value_table(key: &str, value: &str) -> Result<String> {
@@ -1969,6 +3368,61 @@ fn render_config_value_table(key: &str, value: &str) -> Result<String> {
     }
 
     let rows = vec![Row { key, value }];
+    Ok(Table::new(rows).to_string())
+}
+
+fn render_project_table(project: &ProjectMeta) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        key: &'static str,
+        value: String,
+    }
+
+    let rows = vec![
+        Row {
+            key: "name",
+            value: project.name.clone(),
+        },
+        Row {
+            key: "description",
+            value: project.description.clone(),
+        },
+        Row {
+            key: "created_at",
+            value: project.created_at.clone(),
+        },
+        Row {
+            key: "updated_at",
+            value: project.updated_at.clone(),
+        },
+    ];
+
+    Ok(Table::new(rows).to_string())
+}
+
+fn render_project_list_table(projects: &[ProjectMeta]) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        name: String,
+        description: String,
+        updated_at: String,
+    }
+
+    let rows: Vec<Row> = projects
+        .iter()
+        .map(|project| Row {
+            name: project.name.clone(),
+            description: project.description.clone(),
+            updated_at: project.updated_at.clone(),
+        })
+        .collect();
+
     Ok(Table::new(rows).to_string())
 }
 
@@ -2181,6 +3635,7 @@ fn render_recent_tickets_table(tickets: &[TicketSummary]) -> Result<String> {
         title: String,
         status: String,
         priority: String,
+        created_at: String,
         updated_at: String,
         milestone_id: String,
     }
@@ -2192,8 +3647,55 @@ fn render_recent_tickets_table(tickets: &[TicketSummary]) -> Result<String> {
             title: ticket.title.clone(),
             status: ticket.status.clone(),
             priority: ticket.priority.clone(),
+            created_at: ticket.created_at.clone(),
             updated_at: ticket.updated_at.clone(),
             milestone_id: ticket.milestone_id.clone().unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(Table::new(rows).to_string())
+}
+
+fn render_burndown_points_table(points: &[tik_core::BurndownPoint]) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        period_start: String,
+        period_end: String,
+        open_tickets: usize,
+    }
+
+    let rows: Vec<Row> = points
+        .iter()
+        .map(|point| Row {
+            period_start: point.period_start.clone(),
+            period_end: point.period_end.clone(),
+            open_tickets: point.open_tickets,
+        })
+        .collect();
+
+    Ok(Table::new(rows).to_string())
+}
+
+fn render_throughput_points_table(points: &[tik_core::ThroughputPoint]) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        period_start: String,
+        period_end: String,
+        closed_tickets: usize,
+    }
+
+    let rows: Vec<Row> = points
+        .iter()
+        .map(|point| Row {
+            period_start: point.period_start.clone(),
+            period_end: point.period_end.clone(),
+            closed_tickets: point.closed_tickets,
         })
         .collect();
 
@@ -2226,6 +3728,24 @@ fn render_milestone_summary_table(milestones: &[MilestoneSummary]) -> Result<Str
             open_tickets: milestone.open_tickets,
             closed_tickets: milestone.closed_tickets,
         })
+        .collect();
+
+    Ok(Table::new(rows).to_string())
+}
+
+fn render_report_filters_table(filters: &ReportFilters) -> Result<String> {
+    use tabled::Table;
+    use tabled::Tabled;
+
+    #[derive(Tabled)]
+    struct Row {
+        key: String,
+        value: String,
+    }
+
+    let rows: Vec<Row> = report_filter_rows(filters)
+        .into_iter()
+        .map(|(key, value)| Row { key, value })
         .collect();
 
     Ok(Table::new(rows).to_string())
@@ -2300,21 +3820,9 @@ fn stats_rows(stats: &Stats) -> Vec<StatsRow> {
     });
     push_stats_map(&mut rows, "tickets_by_status", &stats.tickets_by_status);
     push_stats_map(&mut rows, "tickets_by_type", &stats.tickets_by_type);
-    push_stats_map(
-        &mut rows,
-        "tickets_by_priority",
-        &stats.tickets_by_priority,
-    );
-    push_stats_map(
-        &mut rows,
-        "tickets_by_severity",
-        &stats.tickets_by_severity,
-    );
-    push_stats_map(
-        &mut rows,
-        "tickets_by_assignee",
-        &stats.tickets_by_assignee,
-    );
+    push_stats_map(&mut rows, "tickets_by_priority", &stats.tickets_by_priority);
+    push_stats_map(&mut rows, "tickets_by_severity", &stats.tickets_by_severity);
+    push_stats_map(&mut rows, "tickets_by_assignee", &stats.tickets_by_assignee);
     push_stats_map(&mut rows, "tickets_by_tag", &stats.tickets_by_tag);
     push_stats_map(
         &mut rows,
@@ -2339,6 +3847,57 @@ fn push_stats_map(rows: &mut Vec<StatsRow>, group: &str, map: &BTreeMap<String, 
     }
 }
 
+fn report_group_by_label(group_by: ReportGroupBy) -> &'static str {
+    match group_by {
+        ReportGroupBy::Day => "day",
+        ReportGroupBy::Week => "week",
+        ReportGroupBy::Month => "month",
+    }
+}
+
+fn report_filter_rows(filters: &ReportFilters) -> Vec<(String, String)> {
+    vec![
+        ("status".to_string(), format_filter_list(&filters.status)),
+        ("tag".to_string(), format_filter_list(&filters.tags)),
+        (
+            "assignee".to_string(),
+            format_filter_list(&filters.assignees),
+        ),
+        (
+            "milestone".to_string(),
+            format_filter_list(&filters.milestone_ids),
+        ),
+        (
+            "since".to_string(),
+            filters.since.clone().unwrap_or_else(|| "any".to_string()),
+        ),
+        (
+            "until".to_string(),
+            filters.until.clone().unwrap_or_else(|| "any".to_string()),
+        ),
+    ]
+}
+
+fn format_filter_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "any".to_string()
+    } else {
+        values.join(",")
+    }
+}
+
+fn graph_node_shape(id: &str) -> &'static str {
+    if id.starts_with("M-") {
+        "box"
+    } else {
+        "ellipse"
+    }
+}
+
+fn escape_dot_label(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\"', "\\\"")
+}
+
 fn format_compact_map(label: &str, map: &BTreeMap<String, usize>) -> String {
     let values = map
         .iter()
@@ -2350,9 +3909,11 @@ fn format_compact_map(label: &str, map: &BTreeMap<String, usize>) -> String {
 
 fn render_status_compact(status: &RepoStatus) -> String {
     format!(
-        "repo_root={} tik_root={} schema_version={} config_version={} layout_version={} index_present={} ticket_count={} milestone_count={}",
+        "repo_root={} tik_root={} project={} project_root={} schema_version={} config_version={} layout_version={} index_present={} ticket_count={} milestone_count={}",
         status.repo_root,
         status.tik_root,
+        status.project,
+        status.project_root,
         status.schema_version,
         status.config_version,
         status.layout_version,
@@ -2360,6 +3921,87 @@ fn render_status_compact(status: &RepoStatus) -> String {
         status.ticket_count,
         status.milestone_count
     )
+}
+
+fn render_doctor_compact(report: &DoctorReport) -> String {
+    let mut out = format!(
+        "ok={} warnings={} errors={}",
+        report.summary.ok, report.summary.warnings, report.summary.errors
+    );
+    for check in &report.checks {
+        let mut line = format!(
+            "{} {} {}",
+            check.status.as_str(),
+            check.scope,
+            check.message
+        );
+        if !check.details.is_empty() {
+            line.push_str(&format!(" [{}]", check.details.join("; ")));
+        }
+        if let Some(hint) = &check.hint {
+            line.push_str(&format!(" hint={hint}"));
+        }
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
+fn render_migration_summary_compact(summary: &MigrationSummary) -> String {
+    let mut out = format!(
+        "migrated_at={} from_layout={} to_layout={} project={} moves={} created={} warnings={}",
+        summary.migrated_at,
+        summary.from_layout,
+        summary.to_layout,
+        summary.project,
+        summary.moves.len(),
+        summary.created.len(),
+        summary.warnings.len()
+    );
+    for item in &summary.moves {
+        out.push_str(&format!("\nmove {} -> {}", item.from, item.to));
+    }
+    for path in &summary.created {
+        out.push_str(&format!("\ncreated {path}"));
+    }
+    for warning in &summary.warnings {
+        out.push_str(&format!("\nwarning {warning}"));
+    }
+    out
+}
+
+fn render_index_status_compact(status: &IndexStatus) -> String {
+    format!(
+        "index_present={} stale={} indexed_at={} ticket_count={} last_ticket_write={} last_milestone_write={}",
+        status.index_present,
+        status.stale,
+        status.indexed_at.clone().unwrap_or_default(),
+        status
+            .ticket_count
+            .map(|count| count.to_string())
+            .unwrap_or_default(),
+        status.last_ticket_write.clone().unwrap_or_default(),
+        status.last_milestone_write.clone().unwrap_or_default()
+    )
+}
+
+fn render_project_compact(project: &ProjectMeta) -> String {
+    if project.description.is_empty() {
+        format!("{} {}", project.name, project.updated_at)
+    } else {
+        format!(
+            "{} {} {}",
+            project.name, project.updated_at, project.description
+        )
+    }
+}
+
+fn render_project_list_compact(projects: &[ProjectMeta]) -> String {
+    projects
+        .iter()
+        .map(render_project_compact)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_index_summary_compact(summary: &IndexSummary) -> String {
@@ -2381,8 +4023,14 @@ fn render_stats_compact(stats: &Stats) -> String {
         format!("tickets_total={}", stats.tickets_total),
         format!("milestones_total={}", stats.milestones_total),
     ];
-    parts.push(format_compact_map("tickets_by_status", &stats.tickets_by_status));
-    parts.push(format_compact_map("tickets_by_type", &stats.tickets_by_type));
+    parts.push(format_compact_map(
+        "tickets_by_status",
+        &stats.tickets_by_status,
+    ));
+    parts.push(format_compact_map(
+        "tickets_by_type",
+        &stats.tickets_by_type,
+    ));
     parts.push(format_compact_map(
         "tickets_by_priority",
         &stats.tickets_by_priority,
@@ -2417,6 +4065,62 @@ fn render_report_compact(report: &Report) -> String {
     )
 }
 
+fn render_burndown_compact(report: &BurndownReport) -> String {
+    let mut out = format!(
+        "generated_at={} group_by={} range={}..{} {} points={}",
+        report.generated_at,
+        report_group_by_label(report.group_by),
+        report.range.since,
+        report.range.until,
+        render_report_filters_compact(&report.filters),
+        report.points.len()
+    );
+    if !report.points.is_empty() {
+        let lines = report
+            .points
+            .iter()
+            .map(|point| {
+                format!(
+                    "{}..{} open={}",
+                    point.period_start, point.period_end, point.open_tickets
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push('\n');
+        out.push_str(&lines);
+    }
+    out
+}
+
+fn render_throughput_compact(report: &ThroughputReport) -> String {
+    let mut out = format!(
+        "generated_at={} group_by={} range={}..{} {} points={}",
+        report.generated_at,
+        report_group_by_label(report.group_by),
+        report.range.since,
+        report.range.until,
+        render_report_filters_compact(&report.filters),
+        report.points.len()
+    );
+    if !report.points.is_empty() {
+        let lines = report
+            .points
+            .iter()
+            .map(|point| {
+                format!(
+                    "{}..{} closed={}",
+                    point.period_start, point.period_end, point.closed_tickets
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push('\n');
+        out.push_str(&lines);
+    }
+    out
+}
+
 fn render_graph_compact(graph: &Graph) -> String {
     let mut out = format!("nodes={} edges={}", graph.nodes.len(), graph.edges.len());
     if !graph.edges.is_empty() {
@@ -2447,6 +4151,14 @@ fn render_milestone_list_compact(milestones: &[Milestone]) -> String {
         .map(render_milestone_compact)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_report_filters_compact(filters: &ReportFilters) -> String {
+    report_filter_rows(filters)
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn render_ticket_compact(ticket: &Ticket) -> String {
@@ -2484,6 +4196,8 @@ fn render_status_md(status: &RepoStatus) -> String {
     out.push_str("| --- | --- |\n");
     out.push_str(&format!("| repo_root | {} |\n", status.repo_root));
     out.push_str(&format!("| tik_root | {} |\n", status.tik_root));
+    out.push_str(&format!("| project | {} |\n", status.project));
+    out.push_str(&format!("| project_root | {} |\n", status.project_root));
     out.push_str(&format!("| schema_version | {} |\n", status.schema_version));
     out.push_str(&format!("| config_version | {} |\n", status.config_version));
     out.push_str(&format!("| layout_version | {} |\n", status.layout_version));
@@ -2493,6 +4207,125 @@ fn render_status_md(status: &RepoStatus) -> String {
         "| milestone_count | {} |\n",
         status.milestone_count
     ));
+    out
+}
+
+fn render_doctor_md(report: &DoctorReport) -> String {
+    let mut out = String::new();
+    out.push_str("| Metric | Value |\n");
+    out.push_str("| --- | --- |\n");
+    out.push_str(&format!("| generated_at | {} |\n", report.generated_at));
+    out.push_str(&format!("| repo_root | {} |\n", report.repo_root));
+    out.push_str(&format!("| layout_version | {} |\n", report.layout_version));
+    out.push_str(&format!("| ok | {} |\n", report.summary.ok));
+    out.push_str(&format!("| warnings | {} |\n", report.summary.warnings));
+    out.push_str(&format!("| errors | {} |\n", report.summary.errors));
+    out.push_str("\n| Status | Scope | Id | Message | Details | Hint |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    for check in &report.checks {
+        let details = check.details.join("; ");
+        let hint = check.hint.clone().unwrap_or_default();
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            check.status.as_str(),
+            check.scope,
+            check.id,
+            check.message,
+            details,
+            hint
+        ));
+    }
+    out
+}
+
+fn render_migration_summary_md(summary: &MigrationSummary) -> String {
+    let mut out = String::new();
+    out.push_str("| Key | Value |\n");
+    out.push_str("| --- | --- |\n");
+    out.push_str(&format!("| migrated_at | {} |\n", summary.migrated_at));
+    out.push_str(&format!("| from_layout | {} |\n", summary.from_layout));
+    out.push_str(&format!("| to_layout | {} |\n", summary.to_layout));
+    out.push_str(&format!("| project | {} |\n", summary.project));
+    out.push_str(&format!("| moves | {} |\n", summary.moves.len()));
+    out.push_str(&format!("| created | {} |\n", summary.created.len()));
+    out.push_str(&format!("| warnings | {} |\n", summary.warnings.len()));
+    if !summary.moves.is_empty() {
+        out.push_str("\n| From | To |\n");
+        out.push_str("| --- | --- |\n");
+        for item in &summary.moves {
+            out.push_str(&format!("| {} | {} |\n", item.from, item.to));
+        }
+    }
+    if !summary.created.is_empty() {
+        out.push_str("\nCreated\n");
+        for path in &summary.created {
+            out.push_str(&format!("- {path}\n"));
+        }
+    }
+    if !summary.warnings.is_empty() {
+        out.push_str("\nWarnings\n");
+        for warning in &summary.warnings {
+            out.push_str(&format!("- {warning}\n"));
+        }
+    }
+    out
+}
+
+fn render_index_status_md(status: &IndexStatus) -> String {
+    let mut out = String::new();
+    out.push_str("| Key | Value |\n");
+    out.push_str("| --- | --- |\n");
+    out.push_str(&format!("| index_present | {} |\n", status.index_present));
+    out.push_str(&format!("| stale | {} |\n", status.stale));
+    out.push_str(&format!(
+        "| indexed_at | {} |\n",
+        status.indexed_at.clone().unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "| ticket_count | {} |\n",
+        status
+            .ticket_count
+            .map(|count| count.to_string())
+            .unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "| last_ticket_write | {} |\n",
+        status.last_ticket_write.clone().unwrap_or_default()
+    ));
+    out.push_str(&format!(
+        "| last_milestone_write | {} |\n",
+        status.last_milestone_write.clone().unwrap_or_default()
+    ));
+    out.push_str(&format!("| fts_path | {} |\n", status.fts_path));
+    out.push_str(&format!(
+        "| tickets_jsonl_path | {} |\n",
+        status.tickets_jsonl_path
+    ));
+    out.push_str(&format!("| metadata_path | {} |\n", status.metadata_path));
+    out
+}
+
+fn render_project_md(project: &ProjectMeta) -> String {
+    let mut out = String::new();
+    out.push_str("| Key | Value |\n");
+    out.push_str("| --- | --- |\n");
+    out.push_str(&format!("| name | {} |\n", project.name));
+    out.push_str(&format!("| description | {} |\n", project.description));
+    out.push_str(&format!("| created_at | {} |\n", project.created_at));
+    out.push_str(&format!("| updated_at | {} |\n", project.updated_at));
+    out
+}
+
+fn render_project_list_md(projects: &[ProjectMeta]) -> String {
+    let mut out = String::new();
+    out.push_str("| Name | Description | Updated At |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for project in projects {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            project.name, project.description, project.updated_at
+        ));
+    }
     out
 }
 
@@ -2526,7 +4359,10 @@ fn render_stats_md(stats: &Stats) -> String {
     out.push_str("| Group | Key | Count |\n");
     out.push_str("| --- | --- | --- |\n");
     for row in stats_rows(stats) {
-        out.push_str(&format!("| {} | {} | {} |\n", row.group, row.key, row.count));
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            row.group, row.key, row.count
+        ));
     }
     out
 }
@@ -2541,6 +4377,58 @@ fn render_report_md(report: &Report) -> String {
     out.push_str(&render_recent_tickets_md(&report.recent_tickets));
     out.push_str("\n\n## Milestones\n\n");
     out.push_str(&render_milestone_summary_md(&report.milestones));
+    out
+}
+
+fn render_burndown_md(report: &BurndownReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Burndown\n\n");
+    out.push_str(&format!("- generated_at: {}\n", report.generated_at));
+    out.push_str(&format!(
+        "- range: {} -> {}\n",
+        report.range.since, report.range.until
+    ));
+    out.push_str(&format!(
+        "- group_by: {}\n\n",
+        report_group_by_label(report.group_by)
+    ));
+    out.push_str("## Filters\n\n");
+    out.push_str(&render_report_filters_md(&report.filters));
+    out.push_str("\n\n## Points\n\n");
+    out.push_str("| Period Start | Period End | Open Tickets |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for point in &report.points {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            point.period_start, point.period_end, point.open_tickets
+        ));
+    }
+    out
+}
+
+fn render_throughput_md(report: &ThroughputReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Throughput\n\n");
+    out.push_str(&format!("- generated_at: {}\n", report.generated_at));
+    out.push_str(&format!(
+        "- range: {} -> {}\n",
+        report.range.since, report.range.until
+    ));
+    out.push_str(&format!(
+        "- group_by: {}\n\n",
+        report_group_by_label(report.group_by)
+    ));
+    out.push_str("## Filters\n\n");
+    out.push_str(&render_report_filters_md(&report.filters));
+    out.push_str("\n\n## Points\n\n");
+    out.push_str("| Period Start | Period End | Closed Tickets |\n");
+    out.push_str("| --- | --- | --- |\n");
+    for point in &report.points {
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            point.period_start, point.period_end, point.closed_tickets
+        ));
+    }
     out
 }
 
@@ -2561,6 +4449,35 @@ fn render_graph_md(graph: &Graph) -> String {
     out.push_str(&render_graph_nodes_md(graph));
     out.push_str("\n\n## Edges\n\n");
     out.push_str(&render_graph_edges_md(graph));
+    out
+}
+
+fn render_graph_dot(graph: &Graph) -> String {
+    let mut out = String::new();
+    out.push_str("digraph tik {\n");
+    for node in &graph.nodes {
+        let label = format!(
+            "{}\\n{}\\n{}",
+            node.id,
+            escape_dot_label(&node.title),
+            node.status
+        );
+        out.push_str(&format!(
+            "  \"{}\" [label=\"{}\", shape=\"{}\"];\n",
+            node.id,
+            label,
+            graph_node_shape(&node.id)
+        ));
+    }
+    for edge in &graph.edges {
+        out.push_str(&format!(
+            "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
+            edge.from,
+            edge.to,
+            escape_dot_label(&edge.relation)
+        ));
+    }
+    out.push_str("}\n");
     out
 }
 
@@ -2589,6 +4506,16 @@ fn render_milestone_list_md(milestones: &[Milestone]) -> String {
             milestone.due_at.clone().unwrap_or_default(),
             milestone.updated_at
         ));
+    }
+    out
+}
+
+fn render_report_filters_md(filters: &ReportFilters) -> String {
+    let mut out = String::new();
+    out.push_str("| Filter | Value |\n");
+    out.push_str("| --- | --- |\n");
+    for (key, value) in report_filter_rows(filters) {
+        out.push_str(&format!("| {key} | {value} |\n"));
     }
     out
 }
@@ -2640,15 +4567,16 @@ fn render_event_list_md(events: &[Event]) -> String {
 
 fn render_recent_tickets_md(tickets: &[TicketSummary]) -> String {
     let mut out = String::new();
-    out.push_str("| ID | Title | Status | Priority | Updated | Milestone |\n");
-    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| ID | Title | Status | Priority | Created | Updated | Milestone |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
     for ticket in tickets {
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
             ticket.id,
             ticket.title,
             ticket.status,
             ticket.priority,
+            ticket.created_at,
             ticket.updated_at,
             ticket.milestone_id.clone().unwrap_or_default()
         ));
@@ -2693,7 +4621,10 @@ fn render_graph_edges_md(graph: &Graph) -> String {
     out.push_str("| From | Relation | To |\n");
     out.push_str("| --- | --- | --- |\n");
     for edge in &graph.edges {
-        out.push_str(&format!("| {} | {} | {} |\n", edge.from, edge.relation, edge.to));
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            edge.from, edge.relation, edge.to
+        ));
     }
     out
 }
@@ -2757,6 +4688,67 @@ fn render_status_csv(status: &RepoStatus) -> Result<String> {
     String::from_utf8(data).map_err(|err| TikError::internal(&format!("csv utf8: {err}")))
 }
 
+fn render_doctor_csv(report: &DoctorReport) -> Result<String> {
+    let mut rows = Vec::new();
+    for check in &report.checks {
+        let details = serde_json::to_string(&check.details)
+            .map_err(|err| TikError::internal(&format!("csv details json: {err}")))?;
+        rows.push(vec![
+            check.status.as_str().to_string(),
+            check.scope.clone(),
+            check.id.clone(),
+            check.message.clone(),
+            details,
+            check.hint.clone().unwrap_or_default(),
+        ]);
+    }
+    csv_write(
+        &["status", "scope", "id", "message", "details_json", "hint"],
+        rows,
+    )
+}
+
+fn render_migration_summary_csv(summary: &MigrationSummary) -> Result<String> {
+    let moves = serde_json::to_string(&summary.moves)
+        .map_err(|err| TikError::internal(&format!("csv moves json: {err}")))?;
+    let created = serde_json::to_string(&summary.created)
+        .map_err(|err| TikError::internal(&format!("csv created json: {err}")))?;
+    let warnings = serde_json::to_string(&summary.warnings)
+        .map_err(|err| TikError::internal(&format!("csv warnings json: {err}")))?;
+    let row = vec![
+        summary.migrated_at.clone(),
+        summary.from_layout.clone(),
+        summary.to_layout.clone(),
+        summary.project.clone(),
+        moves,
+        created,
+        warnings,
+    ];
+    csv_write(
+        &[
+            "migrated_at",
+            "from_layout",
+            "to_layout",
+            "project",
+            "moves_json",
+            "created_json",
+            "warnings_json",
+        ],
+        vec![row],
+    )
+}
+
+fn render_index_status_csv(status: &IndexStatus) -> Result<String> {
+    let mut writer = csv::Writer::from_writer(vec![]);
+    writer
+        .serialize(status)
+        .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    let data = writer
+        .into_inner()
+        .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    String::from_utf8(data).map_err(|err| TikError::internal(&format!("csv utf8: {err}")))
+}
+
 fn render_index_summary_csv(summary: &IndexSummary) -> Result<String> {
     let mut writer = csv::Writer::from_writer(vec![]);
     writer
@@ -2807,6 +4799,7 @@ fn render_report_csv(report: &Report) -> Result<String> {
             "title",
             "status",
             "priority",
+            "created_at",
             "updated_at",
             "milestone_id",
             "due_at",
@@ -2822,6 +4815,7 @@ fn render_report_csv(report: &Report) -> Result<String> {
             String::new(),
             "generated_at".to_string(),
             report.generated_at.clone(),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),
@@ -2853,6 +4847,7 @@ fn render_report_csv(report: &Report) -> Result<String> {
                 String::new(),
                 String::new(),
                 String::new(),
+                String::new(),
             ])
             .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
     }
@@ -2868,6 +4863,7 @@ fn render_report_csv(report: &Report) -> Result<String> {
                 ticket.title.clone(),
                 ticket.status.clone(),
                 ticket.priority.clone(),
+                ticket.created_at.clone(),
                 ticket.updated_at.clone(),
                 ticket.milestone_id.clone().unwrap_or_default(),
                 String::new(),
@@ -2894,10 +4890,109 @@ fn render_report_csv(report: &Report) -> Result<String> {
                 String::new(),
                 String::new(),
                 String::new(),
+                String::new(),
                 milestone.due_at.clone().unwrap_or_default(),
                 total,
                 open,
                 closed,
+            ])
+            .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    }
+
+    let data = writer
+        .into_inner()
+        .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    String::from_utf8(data).map_err(|err| TikError::internal(&format!("csv utf8: {err}")))
+}
+
+fn render_burndown_csv(report: &BurndownReport) -> Result<String> {
+    let mut writer = csv::Writer::from_writer(vec![]);
+    writer
+        .write_record([
+            "period_start",
+            "period_end",
+            "open_tickets",
+            "generated_at",
+            "group_by",
+            "since",
+            "until",
+            "status",
+            "tags",
+            "assignees",
+            "milestones",
+        ])
+        .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+
+    let status = format_filter_list(&report.filters.status);
+    let tags = format_filter_list(&report.filters.tags);
+    let assignees = format_filter_list(&report.filters.assignees);
+    let milestones = format_filter_list(&report.filters.milestone_ids);
+    let group_by = report_group_by_label(report.group_by);
+
+    for point in &report.points {
+        let open_tickets = point.open_tickets.to_string();
+        writer
+            .write_record(vec![
+                point.period_start.clone(),
+                point.period_end.clone(),
+                open_tickets,
+                report.generated_at.clone(),
+                group_by.to_string(),
+                report.range.since.clone(),
+                report.range.until.clone(),
+                status.clone(),
+                tags.clone(),
+                assignees.clone(),
+                milestones.clone(),
+            ])
+            .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    }
+
+    let data = writer
+        .into_inner()
+        .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    String::from_utf8(data).map_err(|err| TikError::internal(&format!("csv utf8: {err}")))
+}
+
+fn render_throughput_csv(report: &ThroughputReport) -> Result<String> {
+    let mut writer = csv::Writer::from_writer(vec![]);
+    writer
+        .write_record([
+            "period_start",
+            "period_end",
+            "closed_tickets",
+            "generated_at",
+            "group_by",
+            "since",
+            "until",
+            "status",
+            "tags",
+            "assignees",
+            "milestones",
+        ])
+        .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+
+    let status = format_filter_list(&report.filters.status);
+    let tags = format_filter_list(&report.filters.tags);
+    let assignees = format_filter_list(&report.filters.assignees);
+    let milestones = format_filter_list(&report.filters.milestone_ids);
+    let group_by = report_group_by_label(report.group_by);
+
+    for point in &report.points {
+        let closed_tickets = point.closed_tickets.to_string();
+        writer
+            .write_record(vec![
+                point.period_start.clone(),
+                point.period_end.clone(),
+                closed_tickets,
+                report.generated_at.clone(),
+                group_by.to_string(),
+                report.range.since.clone(),
+                report.range.until.clone(),
+                status.clone(),
+                tags.clone(),
+                assignees.clone(),
+                milestones.clone(),
             ])
             .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
     }
@@ -2951,6 +5046,19 @@ fn render_graph_csv(graph: &Graph) -> Result<String> {
 fn render_milestone_csv(milestone: &Milestone) -> Result<String> {
     let row = milestone_csv_row(milestone)?;
     csv_write(&milestone_csv_headers(), vec![row])
+}
+
+fn render_project_csv(project: &ProjectMeta) -> Result<String> {
+    let row = project_csv_row(project)?;
+    csv_write(&project_csv_headers(), vec![row])
+}
+
+fn render_project_list_csv(projects: &[ProjectMeta]) -> Result<String> {
+    let mut rows = Vec::new();
+    for project in projects {
+        rows.push(project_csv_row(project)?);
+    }
+    csv_write(&project_csv_headers(), rows)
 }
 
 fn render_milestone_list_csv(milestones: &[Milestone]) -> Result<String> {
@@ -3038,6 +5146,56 @@ fn render_report_jsonl(report: &Report) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
+fn render_burndown_jsonl(report: &BurndownReport) -> Result<String> {
+    let mut lines = Vec::new();
+    let meta = serde_json::json!({
+        "type": "burndown",
+        "generated_at": report.generated_at.as_str(),
+        "group_by": report_group_by_label(report.group_by),
+        "range": &report.range,
+        "filters": &report.filters,
+    });
+    lines.push(
+        serde_json::to_string(&meta)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}")))?,
+    );
+    for point in &report.points {
+        let value = serde_json::json!({
+            "type": "burndown_point",
+            "point": point,
+        });
+        let line = serde_json::to_string(&value)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}")))?;
+        lines.push(line);
+    }
+    Ok(lines.join("\n"))
+}
+
+fn render_throughput_jsonl(report: &ThroughputReport) -> Result<String> {
+    let mut lines = Vec::new();
+    let meta = serde_json::json!({
+        "type": "throughput",
+        "generated_at": report.generated_at.as_str(),
+        "group_by": report_group_by_label(report.group_by),
+        "range": &report.range,
+        "filters": &report.filters,
+    });
+    lines.push(
+        serde_json::to_string(&meta)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}")))?,
+    );
+    for point in &report.points {
+        let value = serde_json::json!({
+            "type": "throughput_point",
+            "point": point,
+        });
+        let line = serde_json::to_string(&value)
+            .map_err(|err| TikError::internal(&format!("jsonl render: {err}")))?;
+        lines.push(line);
+    }
+    Ok(lines.join("\n"))
+}
+
 fn render_graph_jsonl(graph: &Graph) -> Result<String> {
     let mut lines = Vec::new();
     for node in &graph.nodes {
@@ -3069,6 +5227,19 @@ fn render_jsonl<T: serde::Serialize>(items: &[T]) -> Result<String> {
         lines.push(line);
     }
     Ok(lines.join("\n"))
+}
+
+fn project_csv_headers() -> Vec<&'static str> {
+    vec!["name", "description", "created_at", "updated_at"]
+}
+
+fn project_csv_row(project: &ProjectMeta) -> Result<Vec<String>> {
+    Ok(vec![
+        project.name.clone(),
+        project.description.clone(),
+        project.created_at.clone(),
+        project.updated_at.clone(),
+    ])
 }
 
 fn milestone_csv_headers() -> Vec<&'static str> {
@@ -3208,7 +5379,10 @@ fn parse_tickets_csv(raw: &str) -> Result<Vec<Ticket>> {
         );
         map.insert(
             "assignees".to_string(),
-            parse_json_array_field(csv_get(&record, &header_map, "assignees_json")?, "assignees")?,
+            parse_json_array_field(
+                csv_get(&record, &header_map, "assignees_json")?,
+                "assignees",
+            )?,
         );
         let milestone_id = csv_get(&record, &header_map, "milestone_id")?.trim();
         if milestone_id.is_empty() {
@@ -3356,9 +5530,7 @@ fn csv_header_map(
     }
     for key in expected {
         if !map.contains_key(*key) {
-            return Err(TikError::ImportExport(format!(
-                "missing csv header: {key}"
-            )));
+            return Err(TikError::ImportExport(format!("missing csv header: {key}")));
         }
     }
     Ok(map)
@@ -3463,18 +5635,67 @@ fn csv_write(headers: &[&str], rows: Vec<Vec<String>>) -> Result<String> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use tik_core::{Priority, Severity, TicketType};
+    use tempfile::tempdir;
+    use tik_core::{
+        DoctorCheck, DoctorStatus, DoctorSummary, MigrationMove, Priority, Severity, TicketType,
+    };
 
     fn sample_status() -> RepoStatus {
         RepoStatus {
             repo_root: "/repo".to_string(),
             tik_root: "/repo/.tik".to_string(),
+            project: "default".to_string(),
+            project_root: "/repo/.tik/projects/default".to_string(),
             schema_version: "1.0".to_string(),
-            config_version: "1.0".to_string(),
+            config_version: "1.1".to_string(),
             layout_version: "1.0".to_string(),
             index_present: true,
             ticket_count: 1,
             milestone_count: 0,
+        }
+    }
+
+    fn sample_project() -> ProjectMeta {
+        ProjectMeta {
+            schema_version: "1.0".to_string(),
+            name: "alpha".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+            description: "Project alpha".to_string(),
+        }
+    }
+
+    fn sample_doctor_report() -> DoctorReport {
+        let checks = vec![DoctorCheck {
+            id: "layout_version".to_string(),
+            status: DoctorStatus::Warn,
+            scope: "repo".to_string(),
+            message: "layout_version 1.0 (legacy)".to_string(),
+            details: vec!["1.0".to_string()],
+            hint: Some("run `tik migrate`".to_string()),
+        }];
+        let summary = DoctorSummary::from_checks(&checks);
+        DoctorReport {
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+            repo_root: "/repo".to_string(),
+            layout_version: "1.0".to_string(),
+            checks,
+            summary,
+        }
+    }
+
+    fn sample_migration_summary() -> MigrationSummary {
+        MigrationSummary {
+            migrated_at: "2026-01-02T00:00:00Z".to_string(),
+            from_layout: "1.0".to_string(),
+            to_layout: "2.0".to_string(),
+            project: "default".to_string(),
+            moves: vec![MigrationMove {
+                from: "/repo/.tik/tickets".to_string(),
+                to: "/repo/.tik/projects/default/tickets".to_string(),
+            }],
+            created: vec!["/repo/.tik/projects/default/locks".to_string()],
+            warnings: vec!["tmp directory missing; created empty".to_string()],
         }
     }
 
@@ -3483,6 +5704,20 @@ mod tests {
             indexed_at: "2026-01-01T00:00:00Z".to_string(),
             ticket_count: 1,
             index_path: "/repo/.tik/index/fts.sqlite".to_string(),
+        }
+    }
+
+    fn sample_index_status() -> IndexStatus {
+        IndexStatus {
+            index_present: true,
+            fts_path: "/repo/.tik/index/fts.sqlite".to_string(),
+            tickets_jsonl_path: "/repo/.tik/index/tickets.jsonl".to_string(),
+            metadata_path: "/repo/.tik/index/status.json".to_string(),
+            indexed_at: Some("2026-01-02T00:00:00Z".to_string()),
+            ticket_count: Some(2),
+            last_ticket_write: Some("2026-01-02T00:00:00Z".to_string()),
+            last_milestone_write: Some("2026-01-02T00:00:00Z".to_string()),
+            stale: false,
         }
     }
 
@@ -3572,6 +5807,7 @@ mod tests {
             title: "Summary".to_string(),
             status: "open".to_string(),
             priority: "medium".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             milestone_id: Some("M-01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()),
         }
@@ -3595,6 +5831,51 @@ mod tests {
             stats: sample_stats(),
             recent_tickets: vec![sample_ticket_summary()],
             milestones: vec![sample_milestone_summary()],
+        }
+    }
+
+    fn sample_report_filters() -> ReportFilters {
+        ReportFilters {
+            status: vec!["open".to_string()],
+            tags: vec!["mvp".to_string()],
+            assignees: vec!["alice".to_string()],
+            milestone_ids: vec!["M-01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()],
+            since: Some("2026-01-01T00:00:00Z".to_string()),
+            until: Some("2026-01-07T00:00:00Z".to_string()),
+        }
+    }
+
+    fn sample_burndown_report() -> BurndownReport {
+        BurndownReport {
+            generated_at: "2026-01-07T00:00:00Z".to_string(),
+            filters: sample_report_filters(),
+            range: tik_core::ReportRange {
+                since: "2026-01-01T00:00:00Z".to_string(),
+                until: "2026-01-07T00:00:00Z".to_string(),
+            },
+            group_by: ReportGroupBy::Day,
+            points: vec![tik_core::BurndownPoint {
+                period_start: "2026-01-01T00:00:00Z".to_string(),
+                period_end: "2026-01-01T23:59:59Z".to_string(),
+                open_tickets: 3,
+            }],
+        }
+    }
+
+    fn sample_throughput_report() -> ThroughputReport {
+        ThroughputReport {
+            generated_at: "2026-01-07T00:00:00Z".to_string(),
+            filters: sample_report_filters(),
+            range: tik_core::ReportRange {
+                since: "2026-01-01T00:00:00Z".to_string(),
+                until: "2026-01-07T00:00:00Z".to_string(),
+            },
+            group_by: ReportGroupBy::Day,
+            points: vec![tik_core::ThroughputPoint {
+                period_start: "2026-01-01T00:00:00Z".to_string(),
+                period_end: "2026-01-01T23:59:59Z".to_string(),
+                closed_tickets: 1,
+            }],
         }
     }
 
@@ -3638,6 +5919,74 @@ mod tests {
     }
 
     #[test]
+    fn render_project_all_formats() {
+        let project = sample_project();
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Compact,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Yaml,
+            OutputFormat::Md,
+            OutputFormat::Csv,
+        ] {
+            let output = render_project(format, &project).unwrap();
+            assert!(!output.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn render_project_list_all_formats() {
+        let projects = vec![sample_project()];
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Compact,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Yaml,
+            OutputFormat::Md,
+            OutputFormat::Csv,
+        ] {
+            let output = render_project_list(format, &projects).unwrap();
+            assert!(!output.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn render_doctor_all_formats() {
+        let report = sample_doctor_report();
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Compact,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Yaml,
+            OutputFormat::Md,
+            OutputFormat::Csv,
+        ] {
+            let output = render_doctor(format, &report).unwrap();
+            assert!(!output.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn render_migration_summary_all_formats() {
+        let summary = sample_migration_summary();
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Compact,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Yaml,
+            OutputFormat::Md,
+            OutputFormat::Csv,
+        ] {
+            let output = render_migration_summary(format, &summary).unwrap();
+            assert!(!output.trim().is_empty());
+        }
+    }
+
+    #[test]
     fn render_index_summary_all_formats() {
         let summary = sample_index_summary();
         for format in [
@@ -3650,6 +5999,23 @@ mod tests {
             OutputFormat::Csv,
         ] {
             let output = render_index_summary(format, &summary).unwrap();
+            assert!(!output.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn render_index_status_all_formats() {
+        let status = sample_index_status();
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Compact,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Yaml,
+            OutputFormat::Md,
+            OutputFormat::Csv,
+        ] {
+            let output = render_index_status(format, &status).unwrap();
             assert!(!output.trim().is_empty());
         }
     }
@@ -3706,6 +6072,40 @@ mod tests {
     }
 
     #[test]
+    fn render_burndown_all_formats() {
+        let report = sample_burndown_report();
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Compact,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Yaml,
+            OutputFormat::Md,
+            OutputFormat::Csv,
+        ] {
+            let output = render_burndown(format, &report).unwrap();
+            assert!(!output.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn render_throughput_all_formats() {
+        let report = sample_throughput_report();
+        for format in [
+            OutputFormat::Table,
+            OutputFormat::Compact,
+            OutputFormat::Json,
+            OutputFormat::Jsonl,
+            OutputFormat::Yaml,
+            OutputFormat::Md,
+            OutputFormat::Csv,
+        ] {
+            let output = render_throughput(format, &report).unwrap();
+            assert!(!output.trim().is_empty());
+        }
+    }
+
+    #[test]
     fn render_graph_all_formats() {
         let graph = sample_graph();
         for format in [
@@ -3720,6 +6120,14 @@ mod tests {
             let output = render_graph(format, &graph).unwrap();
             assert!(!output.trim().is_empty());
         }
+    }
+
+    #[test]
+    fn render_graph_dot_output() {
+        let graph = sample_graph();
+        let output = render_graph_dot(&graph);
+        assert!(output.contains("digraph tik"));
+        assert!(output.contains("->"));
     }
 
     #[test]
@@ -3886,16 +6294,20 @@ mod tests {
 
     #[test]
     fn resolve_output_format_uses_config() {
-        let mut config = tik_core::Config::default();
-        config.output_format = "yaml".to_string();
+        let config = tik_core::Config {
+            output_format: "yaml".to_string(),
+            ..tik_core::Config::default()
+        };
         let format = resolve_output_format(None, Some(&config)).unwrap();
         assert!(matches!(format, OutputFormat::Yaml));
     }
 
     #[test]
     fn resolve_pager_mode_uses_config() {
-        let mut config = tik_core::Config::default();
-        config.pager = "never".to_string();
+        let config = tik_core::Config {
+            pager: "never".to_string(),
+            ..tik_core::Config::default()
+        };
         let pager = resolve_pager_mode(Some(&config)).unwrap();
         assert_eq!(pager, PagerMode::Never);
     }
@@ -3951,5 +6363,229 @@ mod tests {
             let output = render_config_value(format, "output_format", "json").unwrap();
             assert!(!output.trim().is_empty());
         }
+    }
+
+    #[test]
+    fn parse_json_fields_validate_types() {
+        let tags = parse_json_array_field("[]", "tags").unwrap();
+        assert!(tags.is_array());
+        let empty = parse_json_array_field("", "tags").unwrap();
+        assert!(empty.as_array().unwrap().is_empty());
+        let err = parse_json_array_field("{\"a\":1}", "tags").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+
+        let obj = parse_json_object_field("{}", "custom").unwrap();
+        assert!(obj.is_object());
+        let empty_obj = parse_json_object_field("", "custom").unwrap();
+        assert!(empty_obj.as_object().unwrap().is_empty());
+        let err = parse_json_object_field("[]", "custom").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+    }
+
+    #[test]
+    fn parse_estimate_field_validates_inputs() {
+        let value = parse_estimate_field("", "").unwrap();
+        assert!(value.is_null());
+        let err = parse_estimate_field("1", "").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+        let err = parse_estimate_field("", "days").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+        let value = parse_estimate_field("3.5", "days").unwrap();
+        assert_eq!(value["unit"], "days");
+    }
+
+    #[test]
+    fn parse_export_bundle_markdown_round_trip() {
+        let bundle = ExportBundle {
+            schema_version: "1.0".to_string(),
+            exported_at: "2026-01-01T00:00:00Z".to_string(),
+            tickets: vec![ExportTicket {
+                ticket: sample_ticket(),
+                events: Vec::new(),
+                notes_md: String::new(),
+            }],
+            milestones: vec![ExportMilestone {
+                milestone: sample_milestone(),
+                events: Vec::new(),
+            }],
+        };
+        let rendered = render_export_md(&bundle).unwrap();
+        let parsed = parse_export_bundle_from_md(&rendered).unwrap();
+        assert_eq!(parsed.tickets.len(), 1);
+        assert_eq!(parsed.milestones.len(), 1);
+    }
+
+    #[test]
+    fn parse_import_bundle_csv_requires_scope() {
+        let err = parse_import_bundle_csv("", ExportScopeArg::All).unwrap_err();
+        assert!(matches!(err, TikError::Usage(_)));
+    }
+
+    #[test]
+    fn parse_import_bundle_csv_tickets_and_milestones() {
+        let ticket_csv = render_ticket_list_csv(&[sample_ticket()]).unwrap();
+        let tickets_bundle =
+            parse_import_bundle_csv(&ticket_csv, ExportScopeArg::Tickets).unwrap();
+        assert_eq!(tickets_bundle.tickets.len(), 1);
+
+        let milestone_csv = render_milestone_list_csv(&[sample_milestone()]).unwrap();
+        let milestones_bundle =
+            parse_import_bundle_csv(&milestone_csv, ExportScopeArg::Milestones).unwrap();
+        assert_eq!(milestones_bundle.milestones.len(), 1);
+    }
+
+    #[test]
+    fn write_output_file_writes_contents() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("output.txt");
+        write_output_file(&path, "hello").unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert_eq!(contents, "hello");
+    }
+
+    fn base_cli(quiet: bool) -> Cli {
+        Cli {
+            format: None,
+            no_color: true,
+            quiet,
+            non_interactive: true,
+            project: None,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn run_requires_command_in_non_interactive_mode() {
+        let cli = base_cli(false);
+        let err = run(cli).unwrap_err();
+        assert!(matches!(err, TikError::Usage(_)));
+    }
+
+    #[test]
+    fn run_command_init_status_and_new_show() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let cli = base_cli(true);
+
+        run_command(
+            &cli,
+            Commands::Init {
+                path: Some(root.clone()),
+                setup_claude: false,
+                no_claude: true,
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::Status {
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::New {
+                title: "Alpha".to_string(),
+                summary: None,
+                description: None,
+                tag: vec!["cli".to_string()],
+                actor: Some("tester".to_string()),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        let repo = Repo::open(&root).unwrap();
+        let ticket = repo.list_tickets(None).unwrap().into_iter().next().unwrap();
+        run_command(
+            &cli,
+            Commands::Show {
+                id: ticket.id.as_str().to_string(),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn run_command_config_get_set_and_search() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let cli = base_cli(true);
+        Repo::init(&root, "0.1.0-test").unwrap();
+
+        run_command(
+            &cli,
+            Commands::Config {
+                command: ConfigCommand::Set {
+                    key: "pager".to_string(),
+                    value: "never".to_string(),
+                },
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::Config {
+                command: ConfigCommand::Get {
+                    key: "pager".to_string(),
+                },
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::New {
+                title: "Find me".to_string(),
+                summary: None,
+                description: None,
+                tag: vec!["search".to_string()],
+                actor: Some("tester".to_string()),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::Search {
+                query: vec!["find".to_string()],
+                limit: Some(10),
+                offset: 0,
+                all: false,
+                sort: None,
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn run_command_export_writes_output_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let output = dir.path().join("export.json");
+        let mut cli = base_cli(true);
+        cli.format = Some(OutputFormat::Json);
+        Repo::init(&root, "0.1.0-test").unwrap();
+
+        run_command(
+            &cli,
+            Commands::Export {
+                scope: ExportScopeArg::Tickets,
+                output: Some(output.clone()),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        assert!(output.is_file());
     }
 }

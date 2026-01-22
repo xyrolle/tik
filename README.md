@@ -18,9 +18,12 @@ Implemented in this repo:
 - `tik assign` to add/remove/set assignees.
 - `tik tag` to add/remove/set tags.
 - `tik config show/get/set` for repo config.
+- `tik doctor` and `tik migrate` for integrity checks and upgrades.
+- `tik project init/list/select` with per-project isolation.
 - `tik milestone new/list/show/set/close`.
-- `tik index rebuild` and `tik search` with query filters.
-- `tik stats`, `tik report`, and `tik graph` for reporting.
+- `tik index rebuild/status` and `tik search` with query filters.
+- `tik stats`, `tik report --metric summary|burndown|throughput`, and `tik graph` for reporting.
+- Graph scoping with `--root`, `--depth`, `--relation`, and `--include-milestones` plus DOT export.
 - `tik export` and `tik import` for repo data exchange.
 - Multi-format output: `table`, `compact`, `json`, `jsonl`, `yaml`, `md`, `csv`.
 
@@ -105,6 +108,8 @@ tik link T-01ARZ3NDEKTSV4RRFFQ69G5FAV --artifact file --reference docs/design.md
 tik unlink T-01ARZ3NDEKTSV4RRFFQ69G5FAV --artifact file --reference docs/design.md
 ```
 
+Artifact types: `file`, `url`, `commit`, `pr`.
+
 File artifacts must be relative paths and must not contain `..`.
 
 ### Assign assignees
@@ -128,7 +133,10 @@ tik tag T-01ARZ3NDEKTSV4RRFFQ69G5FAV --clear
 tik config show
 tik config get output_format
 tik config set output_format json
+tik config set ticket_types feature,bug
+tik config bootstrap
 ```
+Ticket option lists (`ticket_types`, `ticket_severities`, `ticket_tags`, `ticket_assignees`, etc.) define allowed values; empty lists mean "any".
 
 ### Milestones
 ```sh
@@ -139,9 +147,18 @@ tik milestone set T-01ARZ3NDEKTSV4RRFFQ69G5FAV M-01ARZ3NDEKTSV4RRFFQ69G5FAV
 tik milestone close M-01ARZ3NDEKTSV4RRFFQ69G5FAV --reason "shipped"
 ```
 
+### Projects
+```sh
+tik project list
+tik project init "client-a" --description "Client A work"
+tik project select "client-a"
+tik --project client-a list
+```
+
 ### Search and index
 ```sh
 tik index rebuild
+tik index status
 tik search "status:open tag:mvp login"
 tik search "created:>=2026-01-01 due:2026-02-01..2026-03-01"
 ```
@@ -150,11 +167,22 @@ Query filters:
 - `status`, `tag`, `assignee`, `type`, `priority`, `severity`, `milestone`
 - `created`, `updated`, `closed`, `due` with `>=`, `<=`, or `start..end`
 
+### Doctor and migrate
+```sh
+tik doctor
+tik doctor --all-projects
+tik migrate
+```
+
 ### Reporting and graphs
 ```sh
 tik stats
-tik report --limit 5
-tik graph --format md
+tik stats --status open --tag mvp --since 2026-01-01
+tik report --metric summary --limit 5 --sort updated --status open
+tik report --metric burndown --group-by week --since 2026-01-01 --until 2026-02-01
+tik report --metric throughput --group-by month --since 2026-01-01
+tik graph --root T-01ARZ3NDEKTSV4RRFFQ69G5FAV --depth 2 --relation blocks --include-milestones
+tik graph --dot > graph.dot
 ```
 
 ### Import and export
@@ -187,28 +215,47 @@ For CSV outputs, nested fields (tags, relations, artifacts, custom) are serializ
 .tik/
   repo.json
   config.json
+  workspace.json
   schema/
     ticket.schema.json
     milestone.schema.json
     event.schema.json
     config.schema.json
-  tickets/
-    T-.../
-      ticket.json
-      notes.jsonl
-      notes.md
-  milestones/
-    M-...json
-    M-...jsonl
-  index/
-    fts.sqlite
-    tickets.jsonl
+  projects/
+    default/
+      project.json
+      config.json
+      tickets/
+        T-.../
+          ticket.json
+          notes.jsonl
+          notes.md
+      milestones/
+        M-...json
+        M-...jsonl
+      index/
+        fts.sqlite
+        tickets.jsonl
+      locks/
+      tmp/
+  locks/
+  tmp/
 ```
 
-## Tests
+## Development Checks
+Install tooling once:
+```sh
+cargo install cargo-deny cargo-audit cargo-llvm-cov
+```
+
 Run after every change:
 ```sh
-cargo test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo deny check
+cargo audit
+cargo llvm-cov --workspace --all-features --fail-under-lines 100
 ```
 
 ## License

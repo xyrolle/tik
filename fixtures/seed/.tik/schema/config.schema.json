@@ -20,6 +20,53 @@
     "timezone": {
       "type": "string",
       "enum": ["UTC", "local"]
+    },
+    "ticket_default_type": {
+      "type": "string",
+      "enum": ["feature", "bug", "chore", "task", "spike"]
+    },
+    "ticket_default_priority": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "ticket_default_severity": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "critical"]
+    },
+    "ticket_types": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["feature", "bug", "chore", "task", "spike"]},
+      "uniqueItems": true
+    },
+    "ticket_priorities": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+      "uniqueItems": true
+    },
+    "ticket_severities": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["low", "normal", "high", "critical"]},
+      "uniqueItems": true
+    },
+    "ticket_statuses": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["open", "in_progress", "blocked", "closed", "archived"]},
+      "uniqueItems": true
+    },
+    "ticket_tags": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "ticket_assignees": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "ticket_estimate_units": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["hours", "days", "weeks", "points", "story_points"]},
+      "uniqueItems": true
     }
   }
 }

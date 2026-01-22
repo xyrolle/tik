@@ -108,7 +108,10 @@
             "type": "string",
             "enum": ["blocks", "blocked_by", "depends_on", "duplicate", "parent", "child"]
           },
-          "id": {"type": "string"}
+          "id": {
+            "type": "string",
+            "pattern": "^T-[0-9A-HJKMNP-TV-Z]{26}$"
+          }
         },
         "additionalProperties": false
       }
@@ -119,7 +122,7 @@
         "type": "object",
         "required": ["type", "ref"],
         "properties": {
-          "type": {"type": "string", "enum": ["file", "url", "commit"]},
+          "type": {"type": "string", "enum": ["file", "url", "commit", "pr"]},
           "ref": {"type": "string"}
         },
         "additionalProperties": false
