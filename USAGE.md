@@ -91,7 +91,7 @@ tik <command> [options]
 |---------|-------------|
 | `tik init` | Initialize a new Tiketer repository |
 | `tik status` | Show repository health and statistics |
-| `tik config show/get/set` | Read or update repo configuration |
+| `tik config show/get/set/bootstrap` | Read or update repo configuration |
 | `tik doctor` | Validate repo integrity and surface issues |
 | `tik migrate` | Run schema/layout migrations |
 | `tik project init/list/select` | Manage workspace projects |
@@ -289,6 +289,15 @@ After running `tik init`, the following structure is created:
   locks/
   tmp/
 ```
+
+### Config Keys (config.json)
+Common keys:
+- `output_format`, `pager`, `timezone`
+- `ticket_default_type`, `ticket_default_priority`, `ticket_default_severity`
+- `ticket_types`, `ticket_priorities`, `ticket_severities`, `ticket_statuses`
+- `ticket_tags`, `ticket_assignees`, `ticket_estimate_units`
+
+Empty lists mean "any". Use `tik config bootstrap` for guided setup.
 
 ## Output Formats
 
