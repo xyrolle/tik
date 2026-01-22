@@ -1,6 +1,16 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "output_format": "table",
   "pager": "auto",
-  "timezone": "UTC"
+  "timezone": "UTC",
+  "ticket_default_type": "task",
+  "ticket_default_priority": "medium",
+  "ticket_default_severity": "normal",
+  "ticket_types": ["feature", "bug", "chore", "task", "spike"],
+  "ticket_priorities": ["low", "medium", "high", "critical"],
+  "ticket_severities": ["low", "normal", "high", "critical"],
+  "ticket_statuses": ["open", "in_progress", "blocked", "closed", "archived"],
+  "ticket_tags": [],
+  "ticket_assignees": [],
+  "ticket_estimate_units": ["hours", "days", "weeks", "points", "story_points"]
 }

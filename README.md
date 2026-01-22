@@ -108,6 +108,8 @@ tik link T-01ARZ3NDEKTSV4RRFFQ69G5FAV --artifact file --reference docs/design.md
 tik unlink T-01ARZ3NDEKTSV4RRFFQ69G5FAV --artifact file --reference docs/design.md
 ```
 
+Artifact types: `file`, `url`, `commit`, `pr`.
+
 File artifacts must be relative paths and must not contain `..`.
 
 ### Assign assignees
@@ -131,7 +133,10 @@ tik tag T-01ARZ3NDEKTSV4RRFFQ69G5FAV --clear
 tik config show
 tik config get output_format
 tik config set output_format json
+tik config set ticket_types feature,bug
+tik config bootstrap
 ```
+Ticket option lists (`ticket_types`, `ticket_severities`, `ticket_tags`, `ticket_assignees`, etc.) define allowed values; empty lists mean "any".
 
 ### Milestones
 ```sh

@@ -732,3 +732,198 @@ pub fn run_comprehensive_checks(tik_root: &Path, data_root: &Path) -> Vec<Doctor
 
     checks
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filetime::{set_file_mtime, FileTime};
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    fn write_ticket(
+        data_root: &Path,
+        id: &str,
+        schema_version: &str,
+        tags: &[&str],
+        estimate_unit: Option<&str>,
+        milestone_id: Option<&str>,
+        relations: &[(&str, &str)],
+    ) {
+        let ticket_dir = data_root.join("tickets").join(id);
+        std::fs::create_dir_all(&ticket_dir).unwrap();
+        let mut ticket = json!({
+            "id": id,
+            "schema_version": schema_version,
+            "tags": tags,
+        });
+        if let Some(unit) = estimate_unit {
+            ticket["estimate"] = json!({"value": 1.0, "unit": unit});
+        }
+        if let Some(milestone) = milestone_id {
+            ticket["milestone_id"] = json!(milestone);
+        }
+        if !relations.is_empty() {
+            let rels: Vec<Value> = relations
+                .iter()
+                .map(|(kind, target)| json!({"type": kind, "id": target}))
+                .collect();
+            ticket["relations"] = json!(rels);
+        }
+        let path = ticket_dir.join("ticket.json");
+        std::fs::write(path, serde_json::to_string_pretty(&ticket).unwrap()).unwrap();
+    }
+
+    fn write_milestone(data_root: &Path, id: &str) {
+        let milestone_dir = data_root.join("milestones");
+        std::fs::create_dir_all(&milestone_dir).unwrap();
+        let milestone = json!({ "id": id });
+        let path = milestone_dir.join(format!("{id}.json"));
+        std::fs::write(path, serde_json::to_string_pretty(&milestone).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn summary_counts_statuses() {
+        let checks = vec![
+            DoctorCheck::ok("ok", "scope", "ok"),
+            DoctorCheck::warn("warn", "scope", "warn", Vec::new(), None),
+            DoctorCheck::error("err", "scope", "err", Vec::new(), None),
+        ];
+        let summary = DoctorSummary::from_checks(&checks);
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.warnings, 1);
+        assert_eq!(summary.errors, 1);
+        assert_eq!(DoctorStatus::Warn.as_str(), "warn");
+    }
+
+    #[test]
+    fn schema_version_checks_detect_outdated() {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        let latest = MigrationRegistry::new().latest_version();
+        let outdated = SchemaVersion::new(latest.major.saturating_sub(1), latest.minor);
+        write_ticket(
+            data_root,
+            "T-ONE",
+            &outdated.as_string(),
+            &[],
+            None,
+            None,
+            &[],
+        );
+        write_ticket(
+            data_root,
+            "T-TWO",
+            &latest.as_string(),
+            &[],
+            None,
+            None,
+            &[],
+        );
+        let checks = check_schema_version(data_root);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, DoctorStatus::Warn));
+        assert!(checks[0].message.contains("outdated"));
+    }
+
+    #[test]
+    fn tag_and_estimate_normalization_checks() {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        write_ticket(
+            data_root,
+            "T-ONE",
+            "1.0",
+            &["Needs Normalize"],
+            Some("hrs"),
+            None,
+            &[],
+        );
+        let tag_checks = check_tag_normalization(data_root);
+        assert_eq!(tag_checks.len(), 1);
+        assert!(matches!(tag_checks[0].status, DoctorStatus::Warn));
+        let estimate_checks = check_estimate_units(data_root);
+        assert_eq!(estimate_checks.len(), 1);
+        assert!(matches!(estimate_checks[0].status, DoctorStatus::Warn));
+    }
+
+    #[test]
+    fn referential_integrity_detects_broken_links() {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        write_ticket(
+            data_root,
+            "T-ONE",
+            "1.0",
+            &[],
+            None,
+            Some("M-MISSING"),
+            &[("blocks", "T-MISSING")],
+        );
+        write_ticket(data_root, "T-TWO", "1.0", &[], None, None, &[]);
+        write_milestone(data_root, "M-REAL");
+
+        let checks = check_referential_integrity(data_root);
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().any(|c| matches!(c.status, DoctorStatus::Error)));
+        assert!(checks[0].message.contains("milestone"));
+        assert!(checks[1].message.contains("relation"));
+    }
+
+    #[test]
+    fn stale_locks_are_reported() {
+        let dir = tempdir().unwrap();
+        let tik_root = dir.path();
+        let locks_dir = tik_root.join("locks");
+        std::fs::create_dir_all(&locks_dir).unwrap();
+        let lock_path = locks_dir.join("repo.lock");
+        std::fs::write(&lock_path, "lock").unwrap();
+        let old_time = FileTime::from_system_time(SystemTime::now() - Duration::from_secs(7200));
+        set_file_mtime(&lock_path, old_time).unwrap();
+
+        let checks = check_stale_locks(tik_root);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, DoctorStatus::Warn));
+        assert!(checks[0].details[0].contains("minutes old"));
+    }
+
+    #[test]
+    fn event_log_consistency_flags_issues() {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        let ticket_dir = data_root.join("tickets").join("T-ONE");
+        std::fs::create_dir_all(&ticket_dir).unwrap();
+        let events = [
+            r#"{"type":"note","ts":"2026-01-02T00:00:00Z"}"#,
+            r#"{"type":"created","ts":"2026-01-01T00:00:00Z"}"#,
+            r#"{"type":"note","ts":"2026-01-03T00:00:00Z"}"#,
+            r#"{bad json"#,
+        ]
+        .join("\n");
+        std::fs::write(ticket_dir.join("notes.jsonl"), events).unwrap();
+
+        let checks = check_event_log_consistency(data_root);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, DoctorStatus::Error));
+        assert!(checks[0].details.iter().any(|d| d.contains("malformed JSON")));
+    }
+
+    #[test]
+    fn index_staleness_reports_missing_and_stale() {
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        let missing = check_index_staleness(data_root);
+        assert_eq!(missing.len(), 1);
+        assert!(matches!(missing[0].status, DoctorStatus::Warn));
+        assert!(missing[0].message.contains("no index"));
+
+        let index_dir = data_root.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(index_dir.join("tickets.jsonl"), "[]\n").unwrap();
+
+        write_ticket(data_root, "T-ONE", "1.0", &[], None, None, &[]);
+        let checks = check_index_staleness(data_root);
+        assert_eq!(checks.len(), 1);
+        assert!(matches!(checks[0].status, DoctorStatus::Warn));
+        assert!(checks[0].message.contains("modified since last index"));
+    }
+}

@@ -740,9 +740,30 @@ impl Repo {
         Ok(config)
     }
 
+    pub fn config_replace(&mut self, mut config: Config) -> Result<Config> {
+        let _repo_lock = self.lock_repo()?;
+        config.normalize()?;
+        let registry = schema::SchemaRegistry::load(&self.schema_dir())?;
+        registry.validate_config(&config)?;
+        Config::write(&self.config_path, &config)?;
+        self.config = config.clone();
+        Ok(config)
+    }
+
     pub fn create_ticket(&self, new_ticket: NewTicket, actor: &str) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
-        let ticket = self.ticket_store().create(new_ticket, actor)?;
+        let now = timeutil::now_rfc3339()?;
+        let defaults = self.config.ticket_defaults()?;
+        let tags = self.config.normalize_and_validate_tags(new_ticket.tags)?;
+        let new_ticket = NewTicket {
+            title: new_ticket.title,
+            summary: new_ticket.summary,
+            description: new_ticket.description,
+            tags,
+        };
+        let ticket = Ticket::new_with_defaults(new_ticket, &now, &defaults);
+        self.config.validate_ticket(&ticket)?;
+        let ticket = self.ticket_store().create_with_ticket(ticket, actor, &now)?;
         self.update_index_for_ticket(&ticket)?;
         Ok(ticket)
     }
@@ -1084,6 +1105,7 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        self.config.validate_ticket_status(&status)?;
         let ticket = self
             .ticket_store()
             .update_status(id, status, actor, reason)?;
@@ -1168,6 +1190,7 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        let assignees = self.config.normalize_and_validate_assignees(assignees)?;
         let ticket = self
             .ticket_store()
             .add_assignees(id, assignees, actor, reason)?;
@@ -1184,6 +1207,7 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        let assignees = self.config.normalize_assignees(assignees)?;
         let ticket = self
             .ticket_store()
             .remove_assignees(id, assignees, actor, reason)?;
@@ -1200,6 +1224,7 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        let assignees = self.config.normalize_and_validate_assignees(assignees)?;
         let ticket = self
             .ticket_store()
             .set_assignees(id, assignees, actor, reason)?;
@@ -1216,6 +1241,7 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        let tags = self.config.normalize_and_validate_tags(tags)?;
         let ticket = self.ticket_store().add_tags(id, tags, actor, reason)?;
         self.update_index_for_ticket(&ticket)?;
         Ok(ticket)
@@ -1230,6 +1256,7 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        let tags = self.config.normalize_tags(tags)?;
         let ticket = self.ticket_store().remove_tags(id, tags, actor, reason)?;
         self.update_index_for_ticket(&ticket)?;
         Ok(ticket)
@@ -1244,6 +1271,7 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        let tags = self.config.normalize_and_validate_tags(tags)?;
         let ticket = self.ticket_store().set_tags(id, tags, actor, reason)?;
         self.update_index_for_ticket(&ticket)?;
         Ok(ticket)
@@ -1258,6 +1286,12 @@ impl Repo {
     ) -> Result<Ticket> {
         let _repo_lock = self.lock_repo()?;
         let _ticket_lock = self.lock_ticket(id)?;
+        let edited: Ticket = serde_json::from_str(raw_json)
+            .map_err(|err| TikError::Schema(format!("invalid ticket json: {err}")))?;
+        if edited.id != *id {
+            return Err(TikError::Schema("ticket id mismatch".to_string()));
+        }
+        self.config.validate_ticket(&edited)?;
         let ticket = self
             .ticket_store()
             .apply_edit(id, raw_json, actor, reason)?;
@@ -2407,8 +2441,7 @@ fn lock_project_shared(project_root: &Path) -> Result<LockGuard> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ticket::NewTicket;
-    use crate::domain::ticket::RelationType;
+    use crate::domain::ticket::{NewTicket, RelationType, TicketType};
     use crate::search::SearchQuery;
     use tempfile::tempdir;
 
@@ -2429,7 +2462,7 @@ mod tests {
         assert!(project_root.join("milestones").is_dir());
         assert!(project_root.join("project.json").is_file());
         assert!(project_root.join("config.json").is_file());
-        assert_eq!(repo.config.schema_version, "1.0");
+        assert_eq!(repo.config.schema_version, "1.1");
     }
 
     #[test]
@@ -2576,6 +2609,48 @@ mod tests {
         .unwrap();
         let status = repo.status().unwrap();
         assert_eq!(status.ticket_count, 2);
+    }
+
+    #[test]
+    fn create_ticket_uses_config_defaults() {
+        let dir = tempdir().unwrap();
+        let mut repo = Repo::init(dir.path(), "0.1.0").unwrap();
+        repo.config_set("ticket_default_type", "feature").unwrap();
+
+        let ticket = repo
+            .create_ticket(
+                NewTicket {
+                    title: "Defaults".to_string(),
+                    summary: None,
+                    description: None,
+                    tags: vec![],
+                },
+                "human",
+            )
+            .unwrap();
+
+        assert_eq!(ticket.kind, TicketType::Feature);
+    }
+
+    #[test]
+    fn create_ticket_rejects_disallowed_tags() {
+        let dir = tempdir().unwrap();
+        let mut repo = Repo::init(dir.path(), "0.1.0").unwrap();
+        repo.config_set("ticket_tags", "mvp").unwrap();
+
+        let err = repo
+            .create_ticket(
+                NewTicket {
+                    title: "Defaults".to_string(),
+                    summary: None,
+                    description: None,
+                    tags: vec!["other".to_string()],
+                },
+                "human",
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, TikError::Usage(_)));
     }
 
     #[test]
@@ -2775,11 +2850,7 @@ mod tests {
         )
         .unwrap();
         let report = repo.burndown(&filters, ReportGroupBy::Day).unwrap();
-        let counts: Vec<usize> = report
-            .points
-            .iter()
-            .map(|point| point.open_tickets)
-            .collect();
+        let counts: Vec<usize> = report.points.iter().map(|point| point.open_tickets).collect();
         assert_eq!(counts, vec![1, 2, 1, 0]);
     }
 

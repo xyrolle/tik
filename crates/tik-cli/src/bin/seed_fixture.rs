@@ -468,3 +468,110 @@ fn seed_custom(component: &str, seed: bool) -> Map<String, Value> {
     custom.insert("seed".to_string(), Value::Bool(seed));
     custom
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use tempfile::tempdir;
+
+    fn ticket_tags(ticket: &Ticket) -> HashSet<&str> {
+        ticket.tags.iter().map(|tag| tag.as_str()).collect()
+    }
+
+    #[test]
+    fn run_creates_seed_repo_and_data() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("seed-repo");
+        run(SeedArgs { path: root.clone() }).unwrap();
+
+        let repo = Repo::open(&root).unwrap();
+        let tickets = repo.list_tickets(None).unwrap();
+        assert!(tickets.len() >= 8);
+
+        let bootstrap = tickets
+            .iter()
+            .find(|ticket| ticket.title == "Bootstrap project")
+            .unwrap();
+        assert_eq!(bootstrap.status, TicketStatus::Open);
+        assert_eq!(bootstrap.kind, TicketType::Feature);
+        assert_eq!(bootstrap.priority, Priority::High);
+        assert_eq!(
+            bootstrap.custom.get("component").and_then(|v| v.as_str()),
+            Some("cli")
+        );
+        assert_eq!(
+            bootstrap.custom.get("seed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let tags = ticket_tags(bootstrap);
+        assert!(tags.contains("mvp"));
+        assert!(tags.contains("cli"));
+        assert!(tags.contains("seed"));
+        assert_eq!(bootstrap.due_at.as_deref(), Some("2026-02-01T00:00:00Z"));
+        assert!(!bootstrap.acceptance.is_empty());
+        assert!(bootstrap.relations.iter().any(|rel| rel.kind == RelationType::Blocks));
+        assert!(bootstrap
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == ArtifactType::File));
+
+        let tui = tickets
+            .iter()
+            .find(|ticket| ticket.title == "Add TUI polish")
+            .unwrap();
+        assert_eq!(tui.status, TicketStatus::InProgress);
+        let notes = repo.read_ticket_notes(&tui.id).unwrap();
+        assert!(notes.contains("Drafted new layout for ticket list"));
+        assert!(notes.contains("[seed-edit]"));
+
+        let events = repo.read_events(&bootstrap.id).unwrap();
+        assert!(events.iter().any(|event| event.kind == "status_change"));
+
+        let parent = tickets
+            .iter()
+            .find(|ticket| ticket.title == "Seed: Parent")
+            .unwrap();
+        assert!(parent.milestone_id.is_some());
+
+        let milestones = repo.list_milestones(None).unwrap();
+        let ga = milestones
+            .iter()
+            .find(|milestone| milestone.title == "Release 0.1")
+            .unwrap();
+        assert_eq!(ga.status, MilestoneStatus::Closed);
+    }
+
+    #[test]
+    fn run_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("seed-repo");
+        run(SeedArgs { path: root.clone() }).unwrap();
+
+        let repo = Repo::open(&root).unwrap();
+        let ticket_count = repo.list_tickets(None).unwrap().len();
+        let milestone_count = repo.list_milestones(None).unwrap().len();
+        let tui = repo
+            .list_tickets(None)
+            .unwrap()
+            .into_iter()
+            .find(|ticket| ticket.title == "Add TUI polish")
+            .unwrap();
+        let notes = repo.read_ticket_notes(&tui.id).unwrap();
+        assert_eq!(notes.matches("[seed-edit]").count(), 1);
+
+        run(SeedArgs { path: root }).unwrap();
+
+        let repo = Repo::open(&dir.path().join("seed-repo")).unwrap();
+        assert_eq!(ticket_count, repo.list_tickets(None).unwrap().len());
+        assert_eq!(milestone_count, repo.list_milestones(None).unwrap().len());
+        let tui = repo
+            .list_tickets(None)
+            .unwrap()
+            .into_iter()
+            .find(|ticket| ticket.title == "Add TUI polish")
+            .unwrap();
+        let notes = repo.read_ticket_notes(&tui.id).unwrap();
+        assert_eq!(notes.matches("[seed-edit]").count(), 1);
+    }
+}

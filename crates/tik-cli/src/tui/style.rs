@@ -161,3 +161,67 @@ pub fn event_icon(event_type: &str) -> &'static str {
         _ => "·",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_color_styles_return_defaults() {
+        assert_eq!(status_style(&TicketStatus::Open, true), Style::default());
+        assert_eq!(highlight_style(true), Style::default());
+        assert_eq!(disabled_style(true), Style::default());
+        assert_eq!(
+            focused_border_style(true),
+            Style::default().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(unfocused_border_style(true), Style::default());
+        assert_eq!(priority_style(&Priority::Low, true), Style::default());
+        assert_eq!(
+            active_tab_style(true),
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        );
+        assert_eq!(inactive_tab_style(true), Style::default());
+        assert_eq!(key_hint_style(true), Style::default());
+        assert_eq!(
+            badge_style(true),
+            Style::default().add_modifier(Modifier::BOLD)
+        );
+        assert_eq!(event_type_style("created", true), Style::default());
+    }
+
+    #[test]
+    fn colored_styles_use_expected_palette() {
+        assert_eq!(
+            status_style(&TicketStatus::Blocked, false).fg,
+            Some(Color::Red)
+        );
+        let critical = priority_style(&Priority::Critical, false);
+        assert_eq!(critical.fg, Some(Color::Red));
+        assert!(critical.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(priority_style(&Priority::High, false).fg, Some(Color::Yellow));
+        assert_eq!(priority_style(&Priority::Medium, false).fg, Some(Color::Gray));
+        assert_eq!(priority_style(&Priority::Low, false).fg, Some(Color::DarkGray));
+        assert_eq!(focused_border_style(false).fg, Some(Color::Cyan));
+        assert_eq!(unfocused_border_style(false).fg, Some(Color::DarkGray));
+        assert_eq!(inactive_tab_style(false).fg, Some(Color::Gray));
+        assert_eq!(key_hint_style(false).fg, Some(Color::Yellow));
+        assert_eq!(badge_style(false).fg, Some(Color::Black));
+        assert_eq!(badge_style(false).bg, Some(Color::Cyan));
+        assert_eq!(event_type_style("edited", false).fg, Some(Color::Magenta));
+        assert_eq!(event_type_style("tagged", false).fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn symbols_and_icons_match_expected_strings() {
+        assert_eq!(priority_symbol(&Priority::Critical), "!!");
+        assert_eq!(priority_symbol(&Priority::High), "!");
+        assert_eq!(priority_symbol(&Priority::Medium), "·");
+        assert_eq!(priority_symbol(&Priority::Low), " ");
+        assert_eq!(status_symbol(&TicketStatus::Open), "○");
+        assert_eq!(status_symbol(&TicketStatus::Archived), "▣");
+        assert_eq!(event_icon("relation_added"), ">");
+        assert_eq!(event_icon("artifact_removed"), "v");
+        assert_eq!(event_icon("unknown"), "·");
+    }
+}

@@ -9,7 +9,8 @@ use tik_core::{Repo, Result, Ticket, TicketId};
 use super::input::ticket_matches_query;
 use super::render::draw;
 use super::state::{
-    DetailsTab, EditorTarget, Mode, Panel, PendingEditor, PendingKey, TicketDetails, TicketFilter,
+    DetailsTab, DiffLine, DiffSnapshot, EditorTarget, GraphState, Mode, Panel, PendingEditor,
+    PendingKey, TicketDetails, TicketFilter, TicketSummary,
 };
 
 /// Main TUI application state.
@@ -123,11 +124,32 @@ impl App {
         // Load events
         let events = repo.read_events(&tid).unwrap_or_default();
 
+        let relation_targets = ticket
+            .relations
+            .iter()
+            .map(|relation| {
+                repo.load_ticket(&relation.id).ok().map(|target| TicketSummary {
+                    id: target.id.as_str().to_string(),
+                    title: target.title.clone(),
+                    status: target.status.clone(),
+                })
+            })
+            .collect();
+
+        let milestone = match ticket.milestone_id.as_ref() {
+            Some(milestone_id) => repo.load_milestone(milestone_id).ok(),
+            None => None,
+        };
+
         self.ticket_details = TicketDetails {
             ticket_id: Some(ticket_id),
             notes,
             events,
             scroll_offset: 0,
+            relation_selected: 0,
+            relation_targets,
+            milestone,
+            diff_state: Default::default(),
         };
 
         Ok(())
@@ -158,7 +180,17 @@ impl App {
                 }
             }
             Panel::Details => {
-                self.ticket_details.scroll_offset += 1;
+                // In Relations tab, navigate through relations
+                if self.details_tab == DetailsTab::Relations {
+                    if let Some(ticket) = self.tickets.get(self.selected) {
+                        let max_rel = ticket.relations.len().saturating_sub(1);
+                        if self.ticket_details.relation_selected < max_rel {
+                            self.ticket_details.relation_selected += 1;
+                        }
+                    }
+                } else {
+                    self.ticket_details.scroll_offset += 1;
+                }
             }
         }
     }
@@ -181,8 +213,15 @@ impl App {
                 }
             }
             Panel::Details => {
-                self.ticket_details.scroll_offset =
-                    self.ticket_details.scroll_offset.saturating_sub(1);
+                // In Relations tab, navigate through relations
+                if self.details_tab == DetailsTab::Relations {
+                    if self.ticket_details.relation_selected > 0 {
+                        self.ticket_details.relation_selected -= 1;
+                    }
+                } else {
+                    self.ticket_details.scroll_offset =
+                        self.ticket_details.scroll_offset.saturating_sub(1);
+                }
             }
         }
     }
@@ -327,9 +366,14 @@ impl App {
                     .map_err(|err| tik_core::TikError::io("read edited ticket", err))?;
 
                 // Validate by parsing
-                let _ticket: tik_core::Ticket = serde_json::from_str(&content).map_err(|err| {
+                let ticket: tik_core::Ticket = serde_json::from_str(&content).map_err(|err| {
                     tik_core::TikError::Schema(format!("invalid ticket JSON: {err}"))
                 })?;
+                if ticket.id != ticket_id {
+                    return Err(tik_core::TikError::Schema(
+                        "ticket id mismatch (id is immutable)".to_string(),
+                    ));
+                }
 
                 // Apply the edit through repo to record the event
                 let actor = std::env::var("TIK_ACTOR")
@@ -398,5 +442,299 @@ impl App {
     /// Get the number of selected tickets.
     pub fn selection_count(&self) -> usize {
         self.selected_ids.len()
+    }
+
+    /// Load diff snapshots for the current ticket.
+    pub fn load_diff_snapshots(&mut self) -> Result<()> {
+        let Some(ticket) = self.tickets.get(self.selected) else {
+            self.ticket_details.diff_state.clear();
+            return Ok(());
+        };
+
+        let Some(repo) = &self.repo else {
+            self.ticket_details.diff_state.clear();
+            return Ok(());
+        };
+
+        let tid = TicketId::parse(ticket.id.as_str())?;
+        let events = repo.read_events(&tid)?;
+
+        // Find snapshot events (created and ticket_edited have full snapshots)
+        let mut snapshots: Vec<DiffSnapshot> = Vec::new();
+
+        for event in &events {
+            // Check for "ticket" key which contains the full ticket JSON snapshot
+            // Events like "created", "ticket_edited", and "imported" store snapshots under "ticket"
+            if event.data.get("ticket").is_some() {
+                let content = if let Some(snapshot) = event.data.get("ticket") {
+                    serde_json::to_string_pretty(snapshot).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                if !content.is_empty() && content != "{}" && content != "null" {
+                    snapshots.push(DiffSnapshot {
+                        timestamp: event.ts.clone(),
+                        actor: event.actor.clone(),
+                        content,
+                    });
+                }
+            }
+        }
+
+        // If we don't have snapshots from events, create one from current state
+        if snapshots.is_empty() {
+            let current_content = serde_json::to_string_pretty(ticket).unwrap_or_default();
+            snapshots.push(DiffSnapshot {
+                timestamp: ticket.updated_at.clone(),
+                actor: "current".to_string(),
+                content: current_content,
+            });
+        }
+
+        // Set up diff state
+        self.ticket_details.diff_state.snapshots = snapshots;
+        self.ticket_details.diff_state.before_idx = 0;
+        self.ticket_details.diff_state.after_idx = self
+            .ticket_details
+            .diff_state
+            .snapshots
+            .len()
+            .saturating_sub(1);
+
+        self.compute_diff()?;
+        Ok(())
+    }
+
+    /// Compute the diff between selected versions.
+    pub fn compute_diff(&mut self) -> Result<()> {
+        use similar::{ChangeTag, TextDiff};
+
+        let diff_state = &mut self.ticket_details.diff_state;
+
+        if diff_state.snapshots.len() < 2 {
+            diff_state.diff_lines.clear();
+            return Ok(());
+        }
+
+        let before = &diff_state.snapshots[diff_state.before_idx];
+        let after = &diff_state.snapshots[diff_state.after_idx];
+
+        let text_diff = TextDiff::from_lines(&before.content, &after.content);
+
+        let mut lines = Vec::new();
+
+        // Add header
+        lines.push(DiffLine::Header(format!(
+            "--- {} ({})",
+            before.timestamp, before.actor
+        )));
+        lines.push(DiffLine::Header(format!(
+            "+++ {} ({})",
+            after.timestamp, after.actor
+        )));
+        lines.push(DiffLine::Context(String::new()));
+
+        for change in text_diff.iter_all_changes() {
+            let text = change.value().trim_end().to_string();
+            match change.tag() {
+                ChangeTag::Delete => {
+                    lines.push(DiffLine::Removed(text));
+                }
+                ChangeTag::Insert => {
+                    lines.push(DiffLine::Added(text));
+                }
+                ChangeTag::Equal => {
+                    lines.push(DiffLine::Context(text));
+                }
+            }
+        }
+
+        diff_state.diff_lines = lines;
+        Ok(())
+    }
+
+    /// Open the dependency graph view.
+    pub fn open_graph_view(&mut self) -> Result<()> {
+        let Some(repo) = &self.repo else {
+            self.status = "repo not initialized".to_string();
+            return Ok(());
+        };
+
+        // Get current ticket ID as root if available
+        let root_id = self.current_ticket_id();
+
+        // Build the graph
+        let graph = repo.graph()?;
+
+        if graph.nodes.is_empty() {
+            self.status = "no tickets with relations found".to_string();
+            return Ok(());
+        }
+
+        let state = GraphState::new(graph, root_id);
+        self.mode = Mode::GraphView(state);
+        self.status = format!(
+            "graph: {} nodes, {} edges",
+            self.tickets.len(),
+            0 // We don't have direct access to edge count here
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use tik_core::{Event, NewTicket, TicketId};
+
+    #[test]
+    fn refresh_filters_by_search_query() {
+        let dir = tempdir().unwrap();
+        let repo = Repo::init(dir.path(), "0.1.0-test").unwrap();
+        repo.create_ticket(
+            NewTicket {
+                title: "Alpha".to_string(),
+                summary: None,
+                description: None,
+                tags: vec![],
+            },
+            "tester",
+        )
+        .unwrap();
+        repo.create_ticket(
+            NewTicket {
+                title: "Beta".to_string(),
+                summary: None,
+                description: None,
+                tags: vec![],
+            },
+            "tester",
+        )
+        .unwrap();
+
+        let mut app = App::new(dir.path().to_path_buf(), Some(repo), true).unwrap();
+        app.search_query = "Alpha".to_string();
+        app.refresh(None).unwrap();
+        assert_eq!(app.tickets.len(), 1);
+        assert_eq!(app.tickets[0].title, "Alpha");
+    }
+
+    #[test]
+    fn list_navigation_wraps() {
+        let dir = tempdir().unwrap();
+        let repo = Repo::init(dir.path(), "0.1.0-test").unwrap();
+        repo.create_ticket(
+            NewTicket {
+                title: "First".to_string(),
+                summary: None,
+                description: None,
+                tags: vec![],
+            },
+            "tester",
+        )
+        .unwrap();
+        repo.create_ticket(
+            NewTicket {
+                title: "Second".to_string(),
+                summary: None,
+                description: None,
+                tags: vec![],
+            },
+            "tester",
+        )
+        .unwrap();
+
+        let mut app = App::new(dir.path().to_path_buf(), Some(repo), true).unwrap();
+        app.focused_panel = Panel::TicketList;
+        app.selected = 0;
+        app.move_up();
+        assert_eq!(app.selected, 1);
+        app.move_down();
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn details_scroll_moves_and_bounds() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path().to_path_buf(), None, true).unwrap();
+        app.focused_panel = Panel::Details;
+        app.ticket_details.scroll_offset = 1;
+        app.move_down();
+        assert_eq!(app.ticket_details.scroll_offset, 2);
+        app.move_up();
+        assert_eq!(app.ticket_details.scroll_offset, 1);
+        app.go_to_bottom();
+        assert!(app.ticket_details.scroll_offset > 1);
+        app.go_to_top();
+        assert_eq!(app.ticket_details.scroll_offset, 0);
+    }
+
+    #[test]
+    fn load_ticket_details_clears_when_empty() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path().to_path_buf(), None, true).unwrap();
+        app.ticket_details.ticket_id = Some("T-TEST".to_string());
+        app.ticket_details.notes = Some("notes".to_string());
+        app.ticket_details.events = vec![Event::note("actor", "ts", "text")];
+        app.load_ticket_details().unwrap();
+        assert!(app.ticket_details.ticket_id.is_none());
+        assert!(app.ticket_details.notes.is_none());
+        assert!(app.ticket_details.events.is_empty());
+    }
+
+    #[test]
+    fn load_ticket_details_skips_when_cached() {
+        let dir = tempdir().unwrap();
+        let repo = Repo::init(dir.path(), "0.1.0-test").unwrap();
+        repo.create_ticket(
+            NewTicket {
+                title: "Cached".to_string(),
+                summary: None,
+                description: None,
+                tags: vec![],
+            },
+            "tester",
+        )
+        .unwrap();
+        let mut app = App::new(dir.path().to_path_buf(), Some(repo), true).unwrap();
+        let current_id = app.current_ticket_id().unwrap();
+        app.ticket_details.ticket_id = Some(current_id);
+        app.ticket_details.notes = Some("cached".to_string());
+        app.load_ticket_details().unwrap();
+        assert_eq!(app.ticket_details.notes.as_deref(), Some("cached"));
+    }
+
+    #[test]
+    fn after_editor_rejects_id_change() {
+        let dir = tempdir().unwrap();
+        let repo = Repo::init(dir.path(), "0.1.0-test").unwrap();
+        let ticket = repo
+            .create_ticket(
+                NewTicket {
+                    title: "Immutable".to_string(),
+                    summary: None,
+                    description: None,
+                    tags: vec![],
+                },
+                "tester",
+            )
+            .unwrap();
+        let ticket_id = ticket.id.clone();
+        let mut app = App::new(dir.path().to_path_buf(), Some(repo), true).unwrap();
+        let path = app
+            .repo
+            .as_ref()
+            .unwrap()
+            .ticket_path(&ticket_id);
+
+        let mut edited = ticket.clone();
+        edited.id = TicketId::parse("T-01ARZ3NDEKTSV4RRFFQ69G5FAZ").unwrap();
+        let raw = serde_json::to_string_pretty(&edited).unwrap();
+        std::fs::write(&path, raw).unwrap();
+
+        let result = app.after_editor(&EditorTarget::Ticket(ticket_id.as_str().to_string()));
+        assert!(result.is_err());
     }
 }

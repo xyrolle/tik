@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -6,7 +7,8 @@ use serde_json::{json, Value};
 use crate::domain::event::Event;
 use crate::domain::ids::{MilestoneId, TicketId};
 use crate::domain::ticket::{
-    Artifact, ArtifactType, NewTicket, Relation, RelationType, Ticket, TicketStatus,
+    normalize_assignee, normalize_tag, Artifact, ArtifactType, NewTicket, Relation, RelationType,
+    Ticket, TicketStatus,
 };
 use crate::fs as tikfs;
 use crate::schema::SchemaRegistry;
@@ -31,6 +33,10 @@ impl TicketStore {
     pub fn create(&self, new_ticket: NewTicket, actor: &str) -> Result<Ticket> {
         let now = timeutil::now_rfc3339()?;
         let ticket = Ticket::new(new_ticket, &now);
+        self.create_with_ticket(ticket, actor, &now)
+    }
+
+    pub fn create_with_ticket(&self, ticket: Ticket, actor: &str, now: &str) -> Result<Ticket> {
         let ticket_dir = self.ticket_dir(&ticket.id);
 
         if ticket_dir.exists() {
@@ -47,7 +53,7 @@ impl TicketStore {
         let created_event = Event::new(
             "created",
             actor,
-            &now,
+            now,
             json!({
                 "title": ticket.title.clone(),
                 "summary": ticket.summary.clone(),
@@ -694,7 +700,7 @@ impl TicketStore {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<Ticket> {
-        let assignees = normalize_values(assignees, "assignee", false)?;
+        let assignees = normalize_values(assignees, "assignee", false, normalize_assignee)?;
 
         let ticket_dir = self.ticket_dir(id);
         let ticket_path = ticket_dir.join("ticket.json");
@@ -704,11 +710,14 @@ impl TicketStore {
 
         let now = timeutil::now_rfc3339()?;
         let mut ticket = self.load(id)?;
+        let mut existing_norm: HashSet<String> =
+            ticket.assignees.iter().map(|value| normalize_assignee(value)).collect();
         let mut added = Vec::new();
         for assignee in assignees {
-            if !ticket.assignees.contains(&assignee) {
+            if !existing_norm.contains(&assignee) {
                 ticket.assignees.push(assignee.clone());
-                added.push(assignee);
+                added.push(assignee.clone());
+                existing_norm.insert(assignee);
             }
         }
         if added.is_empty() {
@@ -747,7 +756,7 @@ impl TicketStore {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<Ticket> {
-        let assignees = normalize_values(assignees, "assignee", false)?;
+        let assignees = normalize_values(assignees, "assignee", false, normalize_assignee)?;
 
         let ticket_dir = self.ticket_dir(id);
         let ticket_path = ticket_dir.join("ticket.json");
@@ -757,18 +766,20 @@ impl TicketStore {
 
         let now = timeutil::now_rfc3339()?;
         let mut ticket = self.load(id)?;
+        let remove_set: HashSet<String> = assignees.iter().cloned().collect();
         let mut removed = Vec::new();
-        for assignee in &assignees {
-            if ticket.assignees.contains(assignee) {
+        ticket.assignees.retain(|assignee| {
+            let normalized = normalize_assignee(assignee);
+            if remove_set.contains(&normalized) {
                 removed.push(assignee.clone());
+                false
+            } else {
+                true
             }
-        }
+        });
         if removed.is_empty() {
             return Ok(ticket);
         }
-        ticket
-            .assignees
-            .retain(|assignee| !assignees.contains(assignee));
         ticket.touch(&now);
 
         let data = if let Some(reason) = reason {
@@ -801,7 +812,7 @@ impl TicketStore {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<Ticket> {
-        let assignees = normalize_values(assignees, "assignee", true)?;
+        let assignees = normalize_values(assignees, "assignee", true, normalize_assignee)?;
 
         let ticket_dir = self.ticket_dir(id);
         let ticket_path = ticket_dir.join("ticket.json");
@@ -852,7 +863,7 @@ impl TicketStore {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<Ticket> {
-        let tags = normalize_values(tags, "tag", false)?;
+        let tags = normalize_values(tags, "tag", false, normalize_tag)?;
 
         let ticket_dir = self.ticket_dir(id);
         let ticket_path = ticket_dir.join("ticket.json");
@@ -862,11 +873,14 @@ impl TicketStore {
 
         let now = timeutil::now_rfc3339()?;
         let mut ticket = self.load(id)?;
+        let mut existing_norm: HashSet<String> =
+            ticket.tags.iter().map(|value| normalize_tag(value)).collect();
         let mut added = Vec::new();
         for tag in tags {
-            if !ticket.tags.contains(&tag) {
+            if !existing_norm.contains(&tag) {
                 ticket.tags.push(tag.clone());
-                added.push(tag);
+                added.push(tag.clone());
+                existing_norm.insert(tag);
             }
         }
         if added.is_empty() {
@@ -905,7 +919,7 @@ impl TicketStore {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<Ticket> {
-        let tags = normalize_values(tags, "tag", false)?;
+        let tags = normalize_values(tags, "tag", false, normalize_tag)?;
 
         let ticket_dir = self.ticket_dir(id);
         let ticket_path = ticket_dir.join("ticket.json");
@@ -915,16 +929,20 @@ impl TicketStore {
 
         let now = timeutil::now_rfc3339()?;
         let mut ticket = self.load(id)?;
+        let remove_set: HashSet<String> = tags.iter().cloned().collect();
         let mut removed = Vec::new();
-        for tag in &tags {
-            if ticket.tags.contains(tag) {
+        ticket.tags.retain(|tag| {
+            let normalized = normalize_tag(tag);
+            if remove_set.contains(&normalized) {
                 removed.push(tag.clone());
+                false
+            } else {
+                true
             }
-        }
+        });
         if removed.is_empty() {
             return Ok(ticket);
         }
-        ticket.tags.retain(|tag| !tags.contains(tag));
         ticket.touch(&now);
 
         let data = if let Some(reason) = reason {
@@ -957,7 +975,7 @@ impl TicketStore {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<Ticket> {
-        let tags = normalize_values(tags, "tag", true)?;
+        let tags = normalize_values(tags, "tag", true, normalize_tag)?;
 
         let ticket_dir = self.ticket_dir(id);
         let ticket_path = ticket_dir.join("ticket.json");
@@ -1308,7 +1326,12 @@ fn apply_event(ticket: &mut Ticket, event: &Event) -> Result<()> {
     }
 }
 
-fn normalize_values(values: Vec<String>, label: &str, allow_empty: bool) -> Result<Vec<String>> {
+fn normalize_values(
+    values: Vec<String>,
+    label: &str,
+    allow_empty: bool,
+    normalizer: fn(&str) -> String,
+) -> Result<Vec<String>> {
     if values.is_empty() {
         if allow_empty {
             return Ok(Vec::new());
@@ -1319,7 +1342,7 @@ fn normalize_values(values: Vec<String>, label: &str, allow_empty: bool) -> Resu
 
     let mut out: Vec<String> = values
         .into_iter()
-        .map(|value| value.trim().to_string())
+        .map(|value| normalizer(&value))
         .filter(|value| !value.is_empty())
         .collect();
     if out.is_empty() {

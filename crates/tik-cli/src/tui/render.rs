@@ -9,8 +9,9 @@ use tik_core::Ticket;
 
 use super::app::App;
 use super::state::{
-    ActionState, ConfirmState, DetailsTab, InputState, MilestoneMenuState, Panel, SearchState,
-    SelectState, TagEditState,
+    ActionState, ConfirmState, DetailsTab, DiffLine, GraphState, InitFocus, InputState,
+    MilestoneMenuState, Panel, RelationEditState, RelationStep, SearchState, SelectState,
+    TagEditState,
 };
 use super::style::{
     active_tab_style, badge_style, disabled_style, event_icon, event_type_style,
@@ -22,30 +23,41 @@ use super::style::{
 pub fn draw(frame: &mut Frame, app: &App) {
     if app.repo.is_none() {
         draw_welcome(frame, app);
-    } else {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(4), // Increased for two-line footer
-            ])
-            .split(frame.size());
-
-        draw_header(frame, layout[0], app);
-        draw_body(frame, layout[1], app);
-        draw_footer(frame, layout[2], app);
+        // Still draw overlays even when repo is not initialized
+        draw_overlays(frame, app);
+        return;
     }
 
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(4), // Increased for two-line footer
+        ])
+        .split(frame.size());
+
+    draw_header(frame, layout[0], app);
+    draw_body(frame, layout[1], app);
+    draw_footer(frame, layout[2], app);
+
+    draw_overlays(frame, app);
+}
+
+/// Draw modal overlays based on current mode.
+fn draw_overlays(frame: &mut Frame, app: &App) {
     match &app.mode {
         super::state::Mode::Input(state) => draw_input_overlay(frame, state),
         super::state::Mode::Confirm(state) => draw_confirm_overlay(frame, state),
+        super::state::Mode::Init(state) => draw_init_overlay(frame, state, app),
         super::state::Mode::Action(state) => draw_action_overlay(frame, state, app),
         super::state::Mode::Search(state) => draw_search_overlay(frame, state, app),
         super::state::Mode::Select(state) => draw_select_overlay(frame, state, app),
         super::state::Mode::Help => draw_help_overlay(frame, app),
         super::state::Mode::MilestoneMenu(state) => draw_milestone_overlay(frame, state, app),
         super::state::Mode::TagEdit(state) => draw_tag_edit_overlay(frame, state, app),
+        super::state::Mode::RelationEdit(state) => draw_relation_edit_overlay(frame, state, app),
+        super::state::Mode::GraphView(state) => draw_graph_overlay(frame, state, app),
         super::state::Mode::Normal => {}
     }
 }
@@ -131,14 +143,13 @@ fn draw_ticket_list(frame: &mut Frame, area: Rect, app: &App) {
     // Focus indicator: ◆ for focused, ○ for unfocused
     let focus_indicator = if is_focused { "◆" } else { "○" };
 
-    // Calculate scroll indicators
-    let visible_height = area.height.saturating_sub(2) as usize; // subtract borders
+    // Calculate navigation indicators (show if there are items above/below selection)
     let total_items = app.tickets.len();
     let can_scroll_up = app.selected > 0;
-    let can_scroll_down = app.selected + 1 < total_items && total_items > visible_height;
+    let can_scroll_down = app.selected + 1 < total_items;
 
     let scroll_indicator = match (can_scroll_up, can_scroll_down) {
-        (true, true) => " ↕",
+        (true, true) => " ▲▼",
         (true, false) => " ▲",
         (false, true) => " ▼",
         (false, false) => "",
@@ -249,6 +260,7 @@ fn draw_details_panel(frame: &mut Frame, area: Rect, app: &App) {
         DetailsTab::Notes => draw_notes_tab(frame, content_area, app),
         DetailsTab::History => draw_history_tab(frame, content_area, app),
         DetailsTab::Relations => draw_relations_tab(frame, content_area, app),
+        DetailsTab::Diff => draw_diff_tab(frame, content_area, app),
     }
 }
 
@@ -267,6 +279,7 @@ fn draw_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         DetailsTab::Notes,
         DetailsTab::History,
         DetailsTab::Relations,
+        DetailsTab::Diff,
     ]
     .iter()
     .enumerate()
@@ -454,19 +467,63 @@ fn draw_relations_tab(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
+    let is_focused = app.focused_panel == Panel::Details;
+    let highlight_style = highlight_style(app.no_color);
+
     let mut lines = Vec::new();
 
-    // Relations
-    lines.push(Line::from("Relations:"));
-    if ticket.relations.is_empty() {
-        lines.push(Line::from("  (none)"));
+    // Relations header with hint
+    if is_focused && !ticket.relations.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("Relations: "),
+            Span::styled(
+                "(+add d:del Enter:jump)",
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]));
     } else {
-        for rel in &ticket.relations {
-            lines.push(Line::from(format!(
-                "  {} {}",
-                rel.kind.as_str(),
-                rel.id.as_str()
-            )));
+        lines.push(Line::from("Relations:"));
+    }
+
+    if ticket.relations.is_empty() {
+        if is_focused {
+            lines.push(Line::from(vec![
+                Span::raw("  (none) "),
+                Span::styled("+ to add", Style::default().add_modifier(Modifier::DIM)),
+            ]));
+        } else {
+            lines.push(Line::from("  (none)"));
+        }
+    } else {
+        for (i, rel) in ticket.relations.iter().enumerate() {
+            let is_selected = is_focused && i == app.ticket_details.relation_selected;
+            let marker = if is_selected { ">> " } else { "   " };
+            let line_style = if is_selected {
+                highlight_style
+            } else {
+                Style::default()
+            };
+            let target_label = match app
+                .ticket_details
+                .relation_targets
+                .get(i)
+                .and_then(|target| target.as_ref())
+            {
+                Some(target) => format!(
+                    "{} [{}] {}",
+                    target.id,
+                    target.status.as_str(),
+                    target.title
+                ),
+                None => format!("{} (missing)", rel.id.as_str()),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, line_style),
+                Span::styled(
+                    format!("{:<12} {}", rel.kind.as_str(), target_label),
+                    line_style,
+                ),
+            ]));
         }
     }
 
@@ -479,7 +536,7 @@ fn draw_relations_tab(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         for artifact in &ticket.artifacts {
             lines.push(Line::from(format!(
-                "  [{}] {}",
+                "   [{}] {}",
                 artifact.kind.as_str(),
                 artifact.reference
             )));
@@ -491,9 +548,109 @@ fn draw_relations_tab(frame: &mut Frame, area: Rect, app: &App) {
     // Milestone
     lines.push(Line::from("Milestone:"));
     if let Some(ref milestone_id) = ticket.milestone_id {
-        lines.push(Line::from(format!("  {}", milestone_id.as_str())));
+        if let Some(milestone) = app.ticket_details.milestone.as_ref() {
+            lines.push(Line::from(format!(
+                "   {} [{}] {}",
+                milestone.id,
+                milestone.status.as_str(),
+                milestone.title
+            )));
+        } else {
+            lines.push(Line::from(format!(
+                "   {} (missing)",
+                milestone_id.as_str()
+            )));
+        }
     } else {
-        lines.push(Line::from("  (none)"));
+        lines.push(Line::from("   (none)"));
+    }
+
+    let scroll = app.ticket_details.scroll_offset;
+    let visible_lines: Vec<Line> = lines.into_iter().skip(scroll).collect();
+
+    let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, area);
+}
+
+/// Draw Diff tab content.
+fn draw_diff_tab(frame: &mut Frame, area: Rect, app: &App) {
+    let diff_state = &app.ticket_details.diff_state;
+
+    let hint_style = if app.no_color {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let added_style = if app.no_color {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+
+    let removed_style = if app.no_color {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::Red)
+    };
+
+    let header_style = if app.no_color {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if diff_state.snapshots.len() < 2 {
+        lines.push(Line::from("Not enough versions to compare."));
+        lines.push(Line::from(Span::styled(
+            "Need at least 2 ticket versions (created + edit events).",
+            hint_style,
+        )));
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // Version selector header
+    let before = &diff_state.snapshots[diff_state.before_idx];
+    let after = &diff_state.snapshots[diff_state.after_idx];
+
+    lines.push(Line::from(vec![
+        Span::styled("Comparing: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{} ", before.timestamp), removed_style),
+        Span::raw("→ "),
+        Span::styled(format!("{}", after.timestamp), added_style),
+    ]));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "({}/{} versions) • j/k: scroll • </> change versions",
+            diff_state.after_idx + 1,
+            diff_state.snapshots.len()
+        ),
+        hint_style,
+    )));
+    lines.push(Line::from(""));
+
+    // Diff content
+    for diff_line in &diff_state.diff_lines {
+        match diff_line {
+            DiffLine::Context(text) => {
+                lines.push(Line::from(format!("  {}", text)));
+            }
+            DiffLine::Added(text) => {
+                lines.push(Line::from(Span::styled(format!("+ {}", text), added_style)));
+            }
+            DiffLine::Removed(text) => {
+                lines.push(Line::from(Span::styled(format!("- {}", text), removed_style)));
+            }
+            DiffLine::Header(text) => {
+                lines.push(Line::from(Span::styled(text.clone(), header_style)));
+            }
+        }
     }
 
     let scroll = app.ticket_details.scroll_offset;
@@ -548,12 +705,15 @@ fn build_status_line(app: &App) -> Line<'static> {
             super::state::Mode::Normal => "NORMAL",
             super::state::Mode::Input(_) => "INPUT",
             super::state::Mode::Confirm(_) => "CONFIRM",
+            super::state::Mode::Init(_) => "INIT",
             super::state::Mode::Action(_) => "ACTION",
             super::state::Mode::Search(_) => "SEARCH",
             super::state::Mode::Select(_) => "SELECT",
             super::state::Mode::Help => "HELP",
             super::state::Mode::MilestoneMenu(_) => "MILESTONE",
             super::state::Mode::TagEdit(_) => "TAGS",
+            super::state::Mode::RelationEdit(_) => "RELATION",
+            super::state::Mode::GraphView(_) => "GRAPH",
         }
     };
 
@@ -575,6 +735,7 @@ fn build_status_line(app: &App) -> Line<'static> {
         super::state::DetailsTab::Notes => "Notes",
         super::state::DetailsTab::History => "History",
         super::state::DetailsTab::Relations => "Relations",
+        super::state::DetailsTab::Diff => "Diff",
     };
 
     let breadcrumb = if app.focused_panel == Panel::Details {
@@ -631,6 +792,8 @@ fn build_hints_line(app: &App) -> Line<'static> {
             add_hint("/", "search", false);
             add_hint("n", "new", false);
             if !app.tickets.is_empty() {
+                add_hint("e", "edit", false);
+                add_hint("o", "editor", false);
                 add_hint("p", "priority", false);
                 add_hint("s", "status", false);
             }
@@ -660,8 +823,10 @@ pub fn draw_input_overlay(frame: &mut Frame, state: &InputState) {
         x: area.x + 2,
         y: area.y + 1,
         width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
+        height: area.height.saturating_sub(3), // Leave room for hints
     };
+
+    // Build field lines
     let lines: Vec<Line> = state
         .fields
         .iter()
@@ -678,6 +843,25 @@ pub fn draw_input_overlay(frame: &mut Frame, state: &InputState) {
         .collect();
     let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
     frame.render_widget(paragraph, inner);
+
+    // Draw key hints at bottom
+    let hints_area = Rect {
+        x: area.x + 2,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width.saturating_sub(4),
+        height: 1,
+    };
+    let hints = Line::from(vec![
+        Span::styled("Ctrl+S", Style::default().fg(Color::Cyan)),
+        Span::raw(" Save  "),
+        Span::styled("Tab/↓", Style::default().fg(Color::Cyan)),
+        Span::raw(" Next  "),
+        Span::styled("Shift+Tab/↑", Style::default().fg(Color::Cyan)),
+        Span::raw(" Prev  "),
+        Span::styled("Esc", Style::default().fg(Color::Cyan)),
+        Span::raw(" Cancel"),
+    ]);
+    frame.render_widget(Paragraph::new(hints), hints_area);
 
     if let Some(field) = state.fields.get(state.current) {
         let label_len = field.label.len();
@@ -703,6 +887,97 @@ pub fn draw_confirm_overlay(frame: &mut Frame, state: &ConfirmState) {
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, area);
+}
+
+/// Draw init overlay with AI setup checkboxes.
+fn draw_init_overlay(frame: &mut Frame, state: &super::state::InitState, app: &App) {
+    let area = centered_rect(55, 35, frame.size());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Initialize Repository ")
+        .title_alignment(Alignment::Center);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Layout: header, checkboxes, footer
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Root path
+            Constraint::Length(1), // Spacing
+            Constraint::Length(4), // Checkboxes
+            Constraint::Min(1),    // Spacing
+            Constraint::Length(1), // Key hints
+        ])
+        .split(inner);
+
+    // Root path (left-aligned with padding)
+    let root_text = format!("  Root: {}", app.root.display());
+    let root_para = Paragraph::new(root_text).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(root_para, layout[0]);
+
+    // Checkboxes
+    let checkbox = |checked: bool| if checked { "[x]" } else { "[ ]" };
+    let focused_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let normal_style = Style::default();
+    let dim_style = Style::default().fg(Color::DarkGray);
+
+    let claude_focused = state.focus == InitFocus::Claude;
+    let agents_focused = state.focus == InitFocus::Agents;
+
+    let checkboxes = vec![
+        // Claude Code
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                if claude_focused { "▸ " } else { "  " },
+                if claude_focused { focused_style } else { normal_style },
+            ),
+            Span::styled(
+                checkbox(state.setup_claude),
+                if claude_focused { focused_style } else { normal_style },
+            ),
+            Span::styled(
+                " Claude Code",
+                if claude_focused { focused_style } else { normal_style },
+            ),
+            Span::styled("  CLAUDE.md, .claude/skills/", dim_style),
+        ]),
+        // Codex CLI
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                if agents_focused { "▸ " } else { "  " },
+                if agents_focused { focused_style } else { normal_style },
+            ),
+            Span::styled(
+                checkbox(state.setup_agents),
+                if agents_focused { focused_style } else { normal_style },
+            ),
+            Span::styled(
+                " Codex CLI",
+                if agents_focused { focused_style } else { normal_style },
+            ),
+            Span::styled("    AGENTS.md", dim_style),
+        ]),
+    ];
+    let checkbox_para = Paragraph::new(checkboxes);
+    frame.render_widget(checkbox_para, layout[2]);
+
+    // Key hints (centered)
+    let hints = Line::from(vec![
+        Span::styled("↑↓", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" move  ", dim_style),
+        Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" toggle  ", dim_style),
+        Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" confirm  ", dim_style),
+        Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(" cancel", dim_style),
+    ]);
+    let hints_para = Paragraph::new(hints).alignment(Alignment::Center);
+    frame.render_widget(hints_para, layout[4]);
 }
 
 /// Draw action menu overlay.
@@ -882,21 +1157,34 @@ pub fn draw_help_overlay(frame: &mut Frame, app: &App) {
             Span::raw(" half-page"),
         ]),
         Line::from(vec![
-            Span::styled("Tab", key_style),
-            Span::raw(" switch panel  "),
-            Span::styled("h", key_style),
+            Span::styled("h/Esc", key_style),
             Span::raw(" left panel  "),
-            Span::styled("l", key_style),
+            Span::styled("l/Enter", key_style),
             Span::raw(" right panel"),
         ]),
         Line::from(""),
         // Details Panel
         Line::from(Span::styled("DETAILS PANEL (right side)", header_style)),
         Line::from(vec![
-            Span::styled("←/[", key_style),
+            Span::styled("Tab/→/]", key_style),
+            Span::raw(" next tab  "),
+            Span::styled("Shift+Tab/←/[", key_style),
             Span::raw(" prev tab  "),
-            Span::styled("→/]", key_style),
-            Span::raw(" next tab"),
+            Span::styled("1-5", key_style),
+            Span::raw(" jump"),
+        ]),
+        Line::from(vec![
+            Span::raw("Tabs: "),
+            Span::styled("1", key_style),
+            Span::raw(" Info  "),
+            Span::styled("2", key_style),
+            Span::raw(" Notes  "),
+            Span::styled("3", key_style),
+            Span::raw(" History  "),
+            Span::styled("4", key_style),
+            Span::raw(" Relations  "),
+            Span::styled("5", key_style),
+            Span::raw(" Diff"),
         ]),
         Line::from(""),
         // Actions
@@ -927,6 +1215,8 @@ pub fn draw_help_overlay(frame: &mut Frame, app: &App) {
             Span::styled("M", key_style),
             Span::raw(" milestone  "),
             Span::styled("e", key_style),
+            Span::raw(" edit  "),
+            Span::styled("o", key_style),
             Span::raw(" edit ($EDITOR)  "),
             Span::styled("E", key_style),
             Span::raw(" edit notes"),
@@ -947,6 +1237,26 @@ pub fn draw_help_overlay(frame: &mut Frame, app: &App) {
             Span::raw(" refresh"),
         ]),
         Line::from(""),
+        // Relations (in Relations tab)
+        Line::from(Span::styled("RELATIONS TAB", header_style)),
+        Line::from(vec![
+            Span::styled("+", key_style),
+            Span::raw(" add relation  "),
+            Span::styled("d", key_style),
+            Span::raw(" delete relation  "),
+            Span::styled("Enter", key_style),
+            Span::raw(" jump to target"),
+        ]),
+        Line::from(""),
+        // Diff tab
+        Line::from(Span::styled("DIFF TAB (press 5)", header_style)),
+        Line::from(vec![
+            Span::styled("</>", key_style),
+            Span::raw(" change versions  "),
+            Span::styled("j/k", key_style),
+            Span::raw(" scroll diff"),
+        ]),
+        Line::from(""),
         // Other
         Line::from(Span::styled("OTHER", header_style)),
         Line::from(vec![
@@ -954,6 +1264,8 @@ pub fn draw_help_overlay(frame: &mut Frame, app: &App) {
             Span::raw(" this help  "),
             Span::styled("m", key_style),
             Span::raw(" action menu  "),
+            Span::styled("D", key_style),
+            Span::raw(" dependency graph  "),
             Span::styled("q", key_style),
             Span::raw(" quit"),
         ]),
@@ -1004,9 +1316,12 @@ pub fn draw_help_overlay(frame: &mut Frame, app: &App) {
 pub fn draw_milestone_overlay(frame: &mut Frame, state: &MilestoneMenuState, app: &App) {
     let area = centered_rect(60, 50, frame.size());
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Set Milestone");
+    let title = if state.ticket_ids.len() > 1 {
+        format!("Set Milestone ({} tickets)", state.ticket_ids.len())
+    } else {
+        "Set Milestone".to_string()
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     frame.render_widget(block, area);
 
     let inner = Rect {
@@ -1065,9 +1380,7 @@ pub fn draw_tag_edit_overlay(frame: &mut Frame, state: &TagEditState, app: &App)
     let selected_suggestion_style = if app.no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     };
 
     let mut lines: Vec<Line> = Vec::new();
@@ -1132,6 +1445,229 @@ pub fn draw_tag_edit_overlay(frame: &mut Frame, state: &TagEditState, app: &App)
     frame.set_cursor(cursor_x.min(max_x), cursor_y);
 }
 
+/// Draw relation edit overlay.
+pub fn draw_relation_edit_overlay(frame: &mut Frame, state: &RelationEditState, app: &App) {
+    let area = centered_rect(70, 60, frame.size());
+    frame.render_widget(Clear, area);
+    let title = match state.step {
+        RelationStep::SelectType => format!("Add Relation - {} (Step 1/2)", state.ticket_id),
+        RelationStep::SearchTarget => format!(
+            "Add Relation - {} {} (Step 2/2)",
+            state.relation_type.as_ref().map(|r| r.as_str()).unwrap_or(""),
+            state.ticket_id
+        ),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
+    };
+
+    let hint_style = if app.no_color {
+        Style::default()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    match state.step {
+        RelationStep::SelectType => {
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from("Select relation type:"));
+            lines.push(Line::from(""));
+
+            for (i, rel_type) in state.relation_types.iter().enumerate() {
+                let is_selected = i == state.type_selected;
+                let marker = if is_selected { ">> " } else { "   " };
+                let style = if is_selected {
+                    highlight_style(app.no_color)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(rel_type.as_str().to_string(), style),
+                ]));
+            }
+
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "j/k to move • Enter to select • Esc to cancel",
+                hint_style,
+            )));
+
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, inner);
+        }
+        RelationStep::SearchTarget => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Search input
+                    Constraint::Min(0),    // Ticket list
+                    Constraint::Length(1), // Hint
+                ])
+                .split(inner);
+
+            // Search input
+            let search_line = Line::from(vec![
+                Span::raw("Search: "),
+                Span::raw(state.search_query.as_str()),
+                Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+            ]);
+            let match_count = format!(" ({} matches)", state.filtered_tickets.len());
+            let search_block = Paragraph::new(vec![
+                search_line,
+                Line::from(Span::styled(match_count, hint_style)),
+            ]);
+            frame.render_widget(search_block, chunks[0]);
+
+            // Ticket list
+            let items: Vec<ListItem> = state
+                .filtered_tickets
+                .iter()
+                .enumerate()
+                .take(chunks[1].height as usize)
+                .map(|(i, ticket)| {
+                    let is_selected = i == state.ticket_selected;
+                    let marker = if is_selected { ">> " } else { "   " };
+                    let status_sym = status_symbol(&ticket.status);
+                    let style = if is_selected {
+                        highlight_style(app.no_color)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(marker, style),
+                        Span::styled(status_sym.to_string(), status_style(&ticket.status, app.no_color)),
+                        Span::raw(" "),
+                        Span::styled(format!("{} ", ticket.id), style),
+                        Span::styled(ticket.title.clone(), style),
+                    ]))
+                })
+                .collect();
+
+            let list = List::new(items);
+            frame.render_widget(list, chunks[1]);
+
+            // Hint
+            let hint = Paragraph::new(Span::styled(
+                "Type to filter • j/k to move • Enter to add • Esc to go back",
+                hint_style,
+            ));
+            frame.render_widget(hint, chunks[2]);
+
+            // Set cursor position
+            let cursor_x = chunks[0].x + 8 + state.search_cursor as u16;
+            let cursor_y = chunks[0].y;
+            let max_x = chunks[0].x + chunks[0].width.saturating_sub(1);
+            frame.set_cursor(cursor_x.min(max_x), cursor_y);
+        }
+    }
+}
+
+/// Draw graph view overlay.
+pub fn draw_graph_overlay(frame: &mut Frame, state: &GraphState, app: &App) {
+    let area = centered_rect(90, 90, frame.size());
+    frame.render_widget(Clear, area);
+
+    let node_count = state.graph.nodes.len();
+    let edge_count = state.graph.edges.len();
+    let title = format!(
+        "Dependency Graph ({} nodes, {} edges)",
+        node_count, edge_count
+    );
+
+    let block = Block::default().borders(Borders::ALL).title(title);
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+
+    let hint_style = if app.no_color {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let highlight_style = if app.no_color {
+        Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let edge_style = if app.no_color {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Split area for graph content and footer
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(2)])
+        .split(inner);
+
+    // Render graph lines
+    let visible_height = chunks[0].height as usize;
+    let mut node_idx = 0;
+
+    let visible_lines: Vec<Line> = state
+        .rendered_lines
+        .iter()
+        .skip(state.scroll_offset)
+        .take(visible_height)
+        .map(|line| {
+            let is_focused = if line.node_id.is_some() {
+                let focused = node_idx == state.focused_node;
+                node_idx += 1;
+                focused
+            } else {
+                false
+            };
+
+            let style = if is_focused {
+                highlight_style
+            } else if line.is_edge {
+                edge_style
+            } else {
+                Style::default()
+            };
+
+            // Add focus marker for focused line
+            let marker = if is_focused { ">> " } else { "   " };
+
+            Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(line.content.clone(), style),
+            ])
+        })
+        .collect();
+
+    let graph_content = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
+    frame.render_widget(graph_content, chunks[0]);
+
+    // Footer with hints
+    let hints = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "j/k: navigate • Enter: jump to ticket • Ctrl+d/u: scroll • q/Esc: close",
+            hint_style,
+        )),
+    ];
+    let footer = Paragraph::new(hints);
+    frame.render_widget(footer, chunks[1]);
+}
+
 /// Create a ticket list item with proper column alignment.
 fn ticket_list_item<'a>(ticket: &'a Ticket, no_color: bool, is_selected: bool) -> ListItem<'a> {
     let priority_sym = priority_symbol(&ticket.priority);
@@ -1144,9 +1680,7 @@ fn ticket_list_item<'a>(ticket: &'a Ticket, no_color: bool, is_selected: bool) -
     let selection_style = if no_color {
         Style::default().add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     };
 
     let line = Line::from(vec![
@@ -1204,4 +1738,260 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         ])
         .split(vertical[1]);
     horizontal[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::{Action, ActionItem, ConfirmAction};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tempfile::tempdir;
+    use tik_core::{
+        ArtifactType, Milestone, NewMilestone, NewTicket, RelationType, Repo, Ticket,
+        TicketStatus,
+    };
+
+    fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(buffer.get(x, y).symbol());
+            }
+            output.push('\n');
+        }
+        output
+    }
+
+    fn render_to_string<F>(width: u16, height: u16, render: F) -> String
+    where
+        F: FnOnce(&mut Frame),
+    {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(render).unwrap();
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn render_app(app: &App) -> String {
+        render_to_string(100, 30, |frame| draw(frame, app))
+    }
+
+    #[test]
+    fn welcome_screen_includes_hint() {
+        let dir = tempdir().unwrap();
+        let app = App::new(dir.path().to_path_buf(), None, true).unwrap();
+        let output = render_app(&app);
+        assert!(output.contains("No .tik repo found in this directory."));
+        assert!(output.contains("Press i to initialize here, or q to quit."));
+    }
+
+    #[test]
+    fn draw_tabs_render_details_content() {
+        let dir = tempdir().unwrap();
+        let repo = Repo::init(dir.path(), "0.1.0-test").unwrap();
+        let ticket = repo
+            .create_ticket(
+                NewTicket {
+                    title: "Add coverage".to_string(),
+                    summary: Some("Summary text".to_string()),
+                    description: Some("Description text".to_string()),
+                    tags: vec!["ui".to_string()],
+                },
+                "tester",
+            )
+            .unwrap();
+        let related = repo
+            .create_ticket(
+                NewTicket {
+                    title: "Related".to_string(),
+                    summary: None,
+                    description: None,
+                    tags: vec![],
+                },
+                "tester",
+            )
+            .unwrap();
+        let milestone = repo
+            .create_milestone(
+                NewMilestone {
+                    title: "Milestone".to_string(),
+                    description: None,
+                    due_at: None,
+                    tags: vec![],
+                },
+                "tester",
+            )
+            .unwrap();
+        repo.add_relation(
+            &ticket.id,
+            RelationType::Blocks,
+            &related.id,
+            "tester",
+            Some("rel"),
+        )
+        .unwrap();
+        repo.add_artifact(
+            &ticket.id,
+            ArtifactType::File,
+            "docs/spec.md",
+            "tester",
+            Some("artifact"),
+        )
+        .unwrap();
+        repo.set_ticket_milestone(&ticket.id, Some(&milestone.id), "tester", Some("ms"))
+            .unwrap();
+        repo.append_note(&ticket.id, "tester", "Note text").unwrap();
+        repo.update_status(&ticket.id, TicketStatus::InProgress, "tester", Some("progress"))
+            .unwrap();
+
+        let mut app = App::new(dir.path().to_path_buf(), Some(repo), true).unwrap();
+        app.focused_panel = Panel::Details;
+
+        app.details_tab = DetailsTab::Info;
+        let info = render_app(&app);
+        assert!(info.contains("Tickets"));
+        assert!(info.contains("Details"));
+        assert!(info.contains("Add coverage"));
+        assert!(info.contains("Summary:"));
+        assert!(info.contains("Description:"));
+
+        app.details_tab = DetailsTab::Notes;
+        let notes = render_app(&app);
+        assert!(notes.contains("Note text"));
+
+        app.details_tab = DetailsTab::History;
+        let history = render_app(&app);
+        assert!(history.contains("status_change"));
+
+        app.details_tab = DetailsTab::Relations;
+        let relations = render_app(&app);
+        assert!(relations.contains("Relations:"));
+        assert!(relations.contains("Artifacts:"));
+        assert!(relations.contains("Milestone:"));
+        assert!(relations.contains("blocks"));
+        assert!(relations.contains("Related"));
+        assert!(relations.contains("[open] Milestone"));
+        assert!(relations.contains("docs/spec.md"));
+    }
+
+    #[test]
+    fn overlays_render_expected_labels() {
+        let dir = tempdir().unwrap();
+        let mut app = App::new(dir.path().to_path_buf(), None, true).unwrap();
+        let ticket = Ticket::new(
+            NewTicket {
+                title: "Ticket One".to_string(),
+                summary: None,
+                description: None,
+                tags: vec![],
+            },
+            "2026-01-01T00:00:00Z",
+        );
+        app.tickets = vec![ticket.clone()];
+        app.selected = 0;
+
+        let input_state = InputState::new_ticket();
+        let input = render_to_string(80, 20, |frame| draw_input_overlay(frame, &input_state));
+        assert!(input.contains("New Ticket"));
+
+        let confirm_state = ConfirmState {
+            prompt: "Confirm?".to_string(),
+            action: ConfirmAction::InitRepo {
+                setup_claude: false,
+                setup_agents: false,
+            },
+        };
+        let confirm = render_to_string(60, 20, |frame| draw_confirm_overlay(frame, &confirm_state));
+        assert!(confirm.contains("Confirm?"));
+
+        let action_state = ActionState {
+            items: vec![
+                ActionItem {
+                    hotkey: 'n',
+                    label: "New Ticket".to_string(),
+                    enabled: true,
+                    action: Action::NewTicket,
+                },
+                ActionItem {
+                    hotkey: 'x',
+                    label: "Disabled".to_string(),
+                    enabled: false,
+                    action: Action::Quit,
+                },
+            ],
+            selected: 0,
+        };
+        let actions =
+            render_to_string(80, 20, |frame| draw_action_overlay(frame, &action_state, &app));
+        assert!(actions.contains("Actions"));
+
+        let mut search_state = SearchState::new("query".to_string(), None);
+        let search_empty =
+            render_to_string(80, 20, |frame| draw_search_overlay(frame, &search_state, &app));
+        assert!(search_empty.contains("Matches:"));
+        search_state.match_indices = vec![0];
+        search_state.current_match = 0;
+        let search =
+            render_to_string(80, 20, |frame| draw_search_overlay(frame, &search_state, &app));
+        assert!(search.contains("Match 1/1"));
+
+        let select_state = SelectState::priority(ticket.id.as_str().to_string(), Vec::new());
+        let select =
+            render_to_string(80, 20, |frame| draw_select_overlay(frame, &select_state, &app));
+        assert!(select.contains("Select Priority"));
+
+        let help = render_to_string(100, 30, |frame| draw_help_overlay(frame, &app));
+        assert!(help.contains("Help"));
+
+        let milestone = Milestone::new(
+            NewMilestone {
+                title: "Milestone".to_string(),
+                description: None,
+                due_at: None,
+                tags: vec![],
+            },
+            "2026-01-01T00:00:00Z",
+        );
+        let milestone_state = MilestoneMenuState {
+            ticket_ids: vec![ticket.id.as_str().to_string()],
+            milestones: vec![milestone],
+            selected: 0,
+        };
+        let milestone_output = render_to_string(80, 20, |frame| {
+            draw_milestone_overlay(frame, &milestone_state, &app);
+        });
+        assert!(milestone_output.contains("Set Milestone"));
+
+        let mut tag_state = TagEditState::new(
+            ticket.id.as_str().to_string(),
+            vec!["ui".to_string()],
+            vec!["ui".to_string(), "ux".to_string()],
+        );
+        tag_state.input = "u".to_string();
+        tag_state.update_suggestions();
+        let tag_output =
+            render_to_string(100, 25, |frame| draw_tag_edit_overlay(frame, &tag_state, &app));
+        assert!(tag_output.contains("Edit Tags"));
+        assert!(tag_output.contains("Suggestions:"));
+    }
+
+    #[test]
+    fn helpers_build_expected_strings() {
+        let mut app = App::new(tempdir().unwrap().path().to_path_buf(), None, true).unwrap();
+        app.status = "ready".to_string();
+        let status_line = build_status_line(&app);
+        let buffer = ratatui::buffer::Buffer::with_lines([status_line]);
+        let output = buffer_to_string(&buffer);
+        assert!(output.contains("ready"));
+
+        let hints_line = build_hints_line(&app);
+        let buffer = ratatui::buffer::Buffer::with_lines([hints_line]);
+        let output = buffer_to_string(&buffer);
+        assert!(output.contains("quit"));
+
+        let centered = centered_rect(50, 50, Rect::new(0, 0, 100, 40));
+        assert_eq!(centered.width, 50);
+        assert_eq!(centered.height, 20);
+    }
 }

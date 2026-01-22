@@ -22,5 +22,8 @@ toml.workspace = true
 ulid.workspace = true
 walkdir.workspace = true
 
+[dev-dependencies]
+filetime.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }

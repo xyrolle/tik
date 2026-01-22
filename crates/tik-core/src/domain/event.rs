@@ -163,6 +163,7 @@ impl Actor {
             }
         }
     }
+
 }
 
 impl std::fmt::Display for Actor {
@@ -248,5 +249,112 @@ mod tests {
         assert_eq!(event.kind, "note");
         assert_eq!(event.actor, "human");
         assert_eq!(event.data["text"], "hello");
+    }
+
+    #[test]
+    fn event_type_parse_accepts_aliases_and_custom() {
+        assert!(matches!(EventType::parse("create"), EventType::Created));
+        assert!(matches!(EventType::parse("comment"), EventType::Note));
+        assert!(matches!(
+            EventType::parse("statuschange"),
+            EventType::StatusChange
+        ));
+        assert!(matches!(
+            EventType::parse("edited"),
+            EventType::TicketEdited
+        ));
+        assert!(matches!(
+            EventType::parse("relationadded"),
+            EventType::RelationAdded
+        ));
+        assert!(matches!(
+            EventType::parse("artifactremoved"),
+            EventType::ArtifactRemoved
+        ));
+        assert!(matches!(
+            EventType::parse("milestonecleared"),
+            EventType::MilestoneCleared
+        ));
+        assert!(matches!(
+            EventType::parse("assigneesadded"),
+            EventType::AssigneesAdded
+        ));
+        assert!(matches!(
+            EventType::parse("tagsremoved"),
+            EventType::TagsRemoved
+        ));
+        match EventType::parse("custom_event") {
+            EventType::Custom(name) => assert_eq!(name, "custom_event"),
+            other => panic!("expected custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn actor_type_parsing_and_display() {
+        assert!(matches!(ActorType::from_str("human"), Ok(ActorType::Human)));
+        assert!(matches!(ActorType::from_str("user"), Ok(ActorType::Human)));
+        assert!(matches!(ActorType::from_str("agent"), Ok(ActorType::Agent)));
+        assert!(matches!(ActorType::from_str("ai"), Ok(ActorType::Agent)));
+        assert!(matches!(ActorType::from_str("bot"), Ok(ActorType::Agent)));
+        assert!(matches!(ActorType::from_str("system"), Ok(ActorType::System)));
+        assert!(matches!(ActorType::from_str("auto"), Ok(ActorType::System)));
+        assert!(matches!(
+            ActorType::from_str("migration"),
+            Ok(ActorType::System)
+        ));
+        assert!(matches!(
+            ActorType::from_str("unknown"),
+            Ok(ActorType::Human)
+        ));
+    }
+
+    #[test]
+    fn actor_parsing_supports_prefixes() {
+        let actor = Actor::parse("agent:codex");
+        assert_eq!(actor.kind, ActorType::Agent);
+        assert_eq!(actor.identifier, "codex");
+
+        let actor = Actor::parse("system");
+        assert_eq!(actor.kind, ActorType::System);
+        assert_eq!(actor.identifier, "system");
+
+        let actor = Actor::parse("ai-bot");
+        assert_eq!(actor.kind, ActorType::Agent);
+
+        let actor = Actor::parse("jane");
+        assert_eq!(actor.kind, ActorType::Human);
+        assert_eq!(actor.to_string(), "human:jane");
+    }
+
+    #[test]
+    fn status_change_event_includes_reason_when_present() {
+        let event = Event::status_change(
+            "human",
+            "2026-01-01T00:00:00Z",
+            "open",
+            "closed",
+            Some("done"),
+        );
+        assert_eq!(event.data["from"], "open");
+        assert_eq!(event.data["to"], "closed");
+        assert_eq!(event.data["reason"], "done");
+
+        let event = Event::status_change(
+            "human",
+            "2026-01-01T00:00:00Z",
+            "open",
+            "closed",
+            None,
+        );
+        assert!(event.data.get("reason").is_none());
+    }
+
+    #[test]
+    fn parsed_event_type_and_actor_work() {
+        let event = Event::new("status_change", "agent:codex", "2026-01-01T00:00:00Z", json!({}));
+        assert!(matches!(event.event_type(), EventType::StatusChange));
+        let actor = event.parsed_actor();
+        assert_eq!(actor.kind, ActorType::Agent);
+        assert_eq!(actor.identifier, "codex");
     }
 }

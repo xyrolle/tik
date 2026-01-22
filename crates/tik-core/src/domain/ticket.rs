@@ -51,6 +51,26 @@ impl TicketType {
             TicketType::Spike => "spike",
         }
     }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        TicketType::from_str(value)
+    }
+}
+
+impl FromStr for TicketType {
+    type Err = TikError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let lower = s.trim().to_lowercase();
+        match lower.as_str() {
+            "feature" => Ok(TicketType::Feature),
+            "bug" => Ok(TicketType::Bug),
+            "chore" => Ok(TicketType::Chore),
+            "task" => Ok(TicketType::Task),
+            "spike" => Ok(TicketType::Spike),
+            _ => Err(TikError::Schema(format!("invalid ticket type: {s}"))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,6 +91,25 @@ impl Priority {
             Priority::Critical => "critical",
         }
     }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        Priority::from_str(value)
+    }
+}
+
+impl FromStr for Priority {
+    type Err = TikError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let lower = s.trim().to_lowercase();
+        match lower.as_str() {
+            "low" => Ok(Priority::Low),
+            "medium" => Ok(Priority::Medium),
+            "high" => Ok(Priority::High),
+            "critical" => Ok(Priority::Critical),
+            _ => Err(TikError::Schema(format!("invalid priority: {s}"))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,6 +128,25 @@ impl Severity {
             Severity::Normal => "normal",
             Severity::High => "high",
             Severity::Critical => "critical",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self> {
+        Severity::from_str(value)
+    }
+}
+
+impl FromStr for Severity {
+    type Err = TikError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let lower = s.trim().to_lowercase();
+        match lower.as_str() {
+            "low" => Ok(Severity::Low),
+            "normal" => Ok(Severity::Normal),
+            "high" => Ok(Severity::High),
+            "critical" => Ok(Severity::Critical),
+            _ => Err(TikError::Schema(format!("invalid severity: {s}"))),
         }
     }
 }
@@ -291,6 +349,7 @@ pub enum ArtifactType {
     File,
     Url,
     Commit,
+    Pr,
 }
 
 impl ArtifactType {
@@ -299,6 +358,7 @@ impl ArtifactType {
             ArtifactType::File => "file",
             ArtifactType::Url => "url",
             ArtifactType::Commit => "commit",
+            ArtifactType::Pr => "pr",
         }
     }
 
@@ -348,8 +408,33 @@ pub struct NewTicket {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TicketDefaults {
+    pub kind: TicketType,
+    pub priority: Priority,
+    pub severity: Severity,
+}
+
+impl Default for TicketDefaults {
+    fn default() -> Self {
+        Self {
+            kind: TicketType::Task,
+            priority: Priority::Medium,
+            severity: Severity::Normal,
+        }
+    }
+}
+
 impl Ticket {
     pub fn new(new_ticket: NewTicket, now: &str) -> Ticket {
+        Ticket::new_with_defaults(new_ticket, now, &TicketDefaults::default())
+    }
+
+    pub fn new_with_defaults(
+        new_ticket: NewTicket,
+        now: &str,
+        defaults: &TicketDefaults,
+    ) -> Ticket {
         let description = new_ticket.description.unwrap_or_else(default_description);
         let summary = new_ticket
             .summary
@@ -360,9 +445,9 @@ impl Ticket {
             id: TicketId::new(),
             title: new_ticket.title,
             status: TicketStatus::Open,
-            kind: TicketType::Task,
-            priority: Priority::Medium,
-            severity: Severity::Normal,
+            kind: defaults.kind.clone(),
+            priority: defaults.priority.clone(),
+            severity: defaults.severity.clone(),
             assignees: Vec::new(),
             milestone_id: None,
             tags: new_ticket.tags,
@@ -434,6 +519,7 @@ impl FromStr for ArtifactType {
             "file" => Ok(ArtifactType::File),
             "url" => Ok(ArtifactType::Url),
             "commit" => Ok(ArtifactType::Commit),
+            "pr" => Ok(ArtifactType::Pr),
             _ => Err(TikError::Schema(format!("invalid artifact type: {s}"))),
         }
     }
@@ -493,6 +579,16 @@ mod tests {
         assert_eq!(TicketType::Bug.as_str(), "bug");
         assert_eq!(RelationType::DependsOn.as_str(), "depends_on");
         assert_eq!(ArtifactType::File.as_str(), "file");
+        assert_eq!(ArtifactType::Pr.as_str(), "pr");
+    }
+
+    #[test]
+    fn parse_ticket_enums_accepts_known_values() {
+        assert!(matches!(TicketType::parse("Feature"), Ok(TicketType::Feature)));
+        assert!(matches!(Priority::parse("HIGH"), Ok(Priority::High)));
+        assert!(matches!(Severity::parse("normal"), Ok(Severity::Normal)));
+        assert!(matches!(ArtifactType::parse("pr"), Ok(ArtifactType::Pr)));
+        assert!(TicketType::parse("nope").is_err());
     }
 
     #[test]

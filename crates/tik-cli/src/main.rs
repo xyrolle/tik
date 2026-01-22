@@ -4,7 +4,11 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
+use dialoguer::Confirm;
 use is_terminal::IsTerminal;
+
+mod claude_setup;
+use claude_setup::setup_claude_integration;
 use tik_core::{
     sort_tickets, ArtifactType, BackupSummary, BurndownReport, DataMigrationReport, DoctorReport,
     Event, ExportBundle, ExportMilestone, ExportTicket, Graph, GraphOptions, ImportSummary,
@@ -43,11 +47,18 @@ struct Cli {
     command: Option<Commands>,
 }
 
+
 #[derive(Subcommand)]
 enum Commands {
     Init {
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Automatically set up Claude Code integration (skill file + CLAUDE.md)
+        #[arg(long)]
+        setup_claude: bool,
+        /// Skip Claude Code integration prompt
+        #[arg(long)]
+        no_claude: bool,
     },
     Status {
         #[arg(long)]
@@ -380,6 +391,8 @@ enum ConfigCommand {
     Show,
     Get { key: String },
     Set { key: String, value: String },
+    #[command(about = "Interactive config bootstrap")]
+    Bootstrap,
 }
 
 #[derive(Subcommand)]
@@ -720,6 +733,8 @@ enum ArtifactTypeArg {
     Url,
     #[value(name = "commit")]
     Commit,
+    #[value(name = "pr", alias = "pull-request")]
+    Pr,
 }
 
 impl From<ArtifactTypeArg> for ArtifactType {
@@ -728,6 +743,7 @@ impl From<ArtifactTypeArg> for ArtifactType {
             ArtifactTypeArg::File => ArtifactType::File,
             ArtifactTypeArg::Url => ArtifactType::Url,
             ArtifactTypeArg::Commit => ArtifactType::Commit,
+            ArtifactTypeArg::Pr => ArtifactType::Pr,
         }
     }
 }
@@ -784,7 +800,11 @@ fn run(mut cli: Cli) -> Result<()> {
 
 fn run_command(cli: &Cli, command: Commands) -> Result<()> {
     match command {
-        Commands::Init { path } => {
+        Commands::Init {
+            path,
+            setup_claude,
+            no_claude,
+        } => {
             let root = resolve_root(path)?;
             let repo = Repo::init(&root, env!("CARGO_PKG_VERSION"))?;
             let status = repo.status()?;
@@ -798,6 +818,32 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                     pager,
                     &render_status(format, &status)?,
                 )?;
+            }
+
+            // Handle Claude Code integration setup
+            let should_setup = if setup_claude {
+                true
+            } else if no_claude || cli.non_interactive {
+                false
+            } else if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                // Interactive prompt if both stdin and stdout are TTY
+                println!(); // Add newline for spacing
+                Confirm::new()
+                    .with_prompt("Set up Claude Code integration? (creates .claude/skills/tiketer.md + CLAUDE.md)")
+                    .default(true)
+                    .interact()
+                    .unwrap_or(false)
+            } else {
+                // Non-TTY: default to setting up Claude integration
+                true
+            };
+
+            if should_setup {
+                let result = setup_claude_integration(&root)?;
+                if !cli.quiet {
+                    println!("{}", result.summary());
+                    println!("AI agent integration ready (Claude Code, Codex). Use --actor \"agent:<name>\" --format json.");
+                }
             }
         }
         Commands::Status { path } => {
@@ -843,6 +889,19 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
                 }
                 ConfigCommand::Set { key, value } => {
                     let config = repo.config_set(&key, &value)?;
+                    if !cli.quiet {
+                        let format = resolve_output_format(cli.format, Some(&config))?;
+                        let pager = resolve_pager_mode(Some(&config))?;
+                        print_output(
+                            format,
+                            cli.no_color,
+                            pager,
+                            &render_config(format, &config)?,
+                        )?;
+                    }
+                }
+                ConfigCommand::Bootstrap => {
+                    let config = run_config_bootstrap(cli, &mut repo)?;
                     if !cli.quiet {
                         let format = resolve_output_format(cli.format, Some(&config))?;
                         let pager = resolve_pager_mode(Some(&config))?;
@@ -1184,7 +1243,8 @@ fn run_command(cli: &Cli, command: Commands) -> Result<()> {
             if dot && cli.format.is_some() {
                 return Err(TikError::usage("--dot cannot be combined with --format"));
             }
-            let options = build_graph_options(root, depth, relation, include_milestones)?;
+            let options =
+                build_graph_options(root, depth, relation, include_milestones)?;
             let graph = repo.graph_with_options(&options)?;
             if !cli.quiet {
                 if dot {
@@ -1741,6 +1801,127 @@ fn resolve_pager_mode(config: Option<&tik_core::Config>) -> Result<PagerMode> {
         return PagerMode::try_from(config.pager.as_str());
     }
     Ok(PagerMode::Auto)
+}
+
+fn run_config_bootstrap(cli: &Cli, repo: &mut Repo) -> Result<tik_core::Config> {
+    if cli.non_interactive {
+        return Err(TikError::usage(
+            "config bootstrap requires a TTY; use `tik config set` instead",
+        ));
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(TikError::usage(
+            "config bootstrap requires a TTY; use `tik config set` instead",
+        ));
+    }
+
+    let mut config = repo.config_show()?;
+    println!("Config bootstrap (Enter to keep current, '-' to clear a list)");
+
+    if let Some(values) = prompt_optional_list("Allowed ticket types", &config.ticket_types)? {
+        config.ticket_types = values;
+    }
+    if let Some(values) =
+        prompt_optional_list("Allowed ticket priorities", &config.ticket_priorities)?
+    {
+        config.ticket_priorities = values;
+    }
+    if let Some(values) =
+        prompt_optional_list("Allowed ticket severities", &config.ticket_severities)?
+    {
+        config.ticket_severities = values;
+    }
+    if let Some(values) = prompt_optional_list("Allowed ticket statuses", &config.ticket_statuses)?
+    {
+        config.ticket_statuses = values;
+    }
+    if let Some(values) = prompt_optional_list(
+        "Allowed ticket estimate units",
+        &config.ticket_estimate_units,
+    )? {
+        config.ticket_estimate_units = values;
+    }
+    if let Some(values) = prompt_optional_list("Allowed ticket tags", &config.ticket_tags)? {
+        config.ticket_tags = values;
+    }
+    if let Some(values) =
+        prompt_optional_list("Allowed ticket assignees", &config.ticket_assignees)?
+    {
+        config.ticket_assignees = values;
+    }
+
+    if let Some(value) =
+        prompt_optional_value("Default ticket type", &config.ticket_default_type)?
+    {
+        config.ticket_default_type = value;
+    }
+    if let Some(value) = prompt_optional_value(
+        "Default ticket priority",
+        &config.ticket_default_priority,
+    )? {
+        config.ticket_default_priority = value;
+    }
+    if let Some(value) = prompt_optional_value(
+        "Default ticket severity",
+        &config.ticket_default_severity,
+    )? {
+        config.ticket_default_severity = value;
+    }
+
+    repo.config_replace(config)
+}
+
+fn prompt_optional_list(label: &str, current: &[String]) -> Result<Option<Vec<String>>> {
+    let current_value = if current.is_empty() {
+        "any".to_string()
+    } else {
+        current.join(", ")
+    };
+    let prompt = format!("{label} [{current_value}]: ");
+    let input = prompt_line(&prompt)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed == "-" {
+        return Ok(Some(Vec::new()));
+    }
+    Ok(Some(parse_csv_list_input(trimmed)))
+}
+
+fn prompt_optional_value(label: &str, current: &str) -> Result<Option<String>> {
+    let prompt = format!("{label} [{current}]: ");
+    let input = prompt_line(&prompt)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    use std::io::{self, Write};
+
+    let mut stdout = io::stdout();
+    stdout
+        .write_all(prompt.as_bytes())
+        .map_err(|err| TikError::io("write prompt", err))?;
+    stdout
+        .flush()
+        .map_err(|err| TikError::io("flush prompt", err))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|err| TikError::io("read prompt", err))?;
+    Ok(input)
+}
+
+fn parse_csv_list_input(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .collect()
 }
 
 fn resolve_pagination(
@@ -2996,6 +3177,46 @@ fn render_config_table(config: &tik_core::Config) -> Result<String> {
             key: "timezone",
             value: config.timezone.clone(),
         },
+        Row {
+            key: "ticket_default_type",
+            value: config.ticket_default_type.clone(),
+        },
+        Row {
+            key: "ticket_default_priority",
+            value: config.ticket_default_priority.clone(),
+        },
+        Row {
+            key: "ticket_default_severity",
+            value: config.ticket_default_severity.clone(),
+        },
+        Row {
+            key: "ticket_types",
+            value: format_config_list(&config.ticket_types),
+        },
+        Row {
+            key: "ticket_priorities",
+            value: format_config_list(&config.ticket_priorities),
+        },
+        Row {
+            key: "ticket_severities",
+            value: format_config_list(&config.ticket_severities),
+        },
+        Row {
+            key: "ticket_statuses",
+            value: format_config_list(&config.ticket_statuses),
+        },
+        Row {
+            key: "ticket_estimate_units",
+            value: format_config_list(&config.ticket_estimate_units),
+        },
+        Row {
+            key: "ticket_tags",
+            value: format_config_list(&config.ticket_tags),
+        },
+        Row {
+            key: "ticket_assignees",
+            value: format_config_list(&config.ticket_assignees),
+        },
     ];
 
     Ok(Table::new(rows).to_string())
@@ -3003,8 +3224,21 @@ fn render_config_table(config: &tik_core::Config) -> Result<String> {
 
 fn render_config_compact(config: &tik_core::Config) -> String {
     format!(
-        "schema_version={} output_format={} pager={} timezone={}",
-        config.schema_version, config.output_format, config.pager, config.timezone
+        "schema_version={} output_format={} pager={} timezone={} ticket_default_type={} ticket_default_priority={} ticket_default_severity={} ticket_types={} ticket_priorities={} ticket_severities={} ticket_statuses={} ticket_estimate_units={} ticket_tags={} ticket_assignees={}",
+        config.schema_version,
+        config.output_format,
+        config.pager,
+        config.timezone,
+        config.ticket_default_type,
+        config.ticket_default_priority,
+        config.ticket_default_severity,
+        format_config_list(&config.ticket_types),
+        format_config_list(&config.ticket_priorities),
+        format_config_list(&config.ticket_severities),
+        format_config_list(&config.ticket_statuses),
+        format_config_list(&config.ticket_estimate_units),
+        format_config_list(&config.ticket_tags),
+        format_config_list(&config.ticket_assignees)
     )
 }
 
@@ -3016,26 +3250,111 @@ fn render_config_md(config: &tik_core::Config) -> String {
     out.push_str(&format!("| output_format | {} |\n", config.output_format));
     out.push_str(&format!("| pager | {} |\n", config.pager));
     out.push_str(&format!("| timezone | {} |\n", config.timezone));
+    out.push_str(&format!(
+        "| ticket_default_type | {} |\n",
+        config.ticket_default_type
+    ));
+    out.push_str(&format!(
+        "| ticket_default_priority | {} |\n",
+        config.ticket_default_priority
+    ));
+    out.push_str(&format!(
+        "| ticket_default_severity | {} |\n",
+        config.ticket_default_severity
+    ));
+    out.push_str(&format!(
+        "| ticket_types | {} |\n",
+        format_config_list(&config.ticket_types)
+    ));
+    out.push_str(&format!(
+        "| ticket_priorities | {} |\n",
+        format_config_list(&config.ticket_priorities)
+    ));
+    out.push_str(&format!(
+        "| ticket_severities | {} |\n",
+        format_config_list(&config.ticket_severities)
+    ));
+    out.push_str(&format!(
+        "| ticket_statuses | {} |\n",
+        format_config_list(&config.ticket_statuses)
+    ));
+    out.push_str(&format!(
+        "| ticket_estimate_units | {} |\n",
+        format_config_list(&config.ticket_estimate_units)
+    ));
+    out.push_str(&format!(
+        "| ticket_tags | {} |\n",
+        format_config_list(&config.ticket_tags)
+    ));
+    out.push_str(&format!(
+        "| ticket_assignees | {} |\n",
+        format_config_list(&config.ticket_assignees)
+    ));
     out
 }
 
 fn render_config_csv(config: &tik_core::Config) -> Result<String> {
     let mut writer = csv::Writer::from_writer(vec![]);
     writer
-        .write_record(["schema_version", "output_format", "pager", "timezone"])
+        .write_record([
+            "schema_version",
+            "output_format",
+            "pager",
+            "timezone",
+            "ticket_default_type",
+            "ticket_default_priority",
+            "ticket_default_severity",
+            "ticket_types",
+            "ticket_priorities",
+            "ticket_severities",
+            "ticket_statuses",
+            "ticket_estimate_units",
+            "ticket_tags",
+            "ticket_assignees",
+        ])
         .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
+    let ticket_types = format_config_list_csv(&config.ticket_types);
+    let ticket_priorities = format_config_list_csv(&config.ticket_priorities);
+    let ticket_severities = format_config_list_csv(&config.ticket_severities);
+    let ticket_statuses = format_config_list_csv(&config.ticket_statuses);
+    let ticket_estimate_units = format_config_list_csv(&config.ticket_estimate_units);
+    let ticket_tags = format_config_list_csv(&config.ticket_tags);
+    let ticket_assignees = format_config_list_csv(&config.ticket_assignees);
+
     writer
         .write_record([
             config.schema_version.as_str(),
             config.output_format.as_str(),
             config.pager.as_str(),
             config.timezone.as_str(),
+            config.ticket_default_type.as_str(),
+            config.ticket_default_priority.as_str(),
+            config.ticket_default_severity.as_str(),
+            ticket_types.as_str(),
+            ticket_priorities.as_str(),
+            ticket_severities.as_str(),
+            ticket_statuses.as_str(),
+            ticket_estimate_units.as_str(),
+            ticket_tags.as_str(),
+            ticket_assignees.as_str(),
         ])
         .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
     let data = writer
         .into_inner()
         .map_err(|err| TikError::internal(&format!("csv render: {err}")))?;
     String::from_utf8(data).map_err(|err| TikError::internal(&format!("csv utf8: {err}")))
+}
+
+fn format_config_list(values: &[String]) -> String {
+    if values.is_empty() {
+        "any".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn format_config_list_csv(values: &[String]) -> String {
+    values.join(",")
 }
 
 fn render_config_value_table(key: &str, value: &str) -> Result<String> {
@@ -5316,6 +5635,7 @@ fn csv_write(headers: &[&str], rows: Vec<Vec<String>>) -> Result<String> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use tempfile::tempdir;
     use tik_core::{
         DoctorCheck, DoctorStatus, DoctorSummary, MigrationMove, Priority, Severity, TicketType,
     };
@@ -5327,7 +5647,7 @@ mod tests {
             project: "default".to_string(),
             project_root: "/repo/.tik/projects/default".to_string(),
             schema_version: "1.0".to_string(),
-            config_version: "1.0".to_string(),
+            config_version: "1.1".to_string(),
             layout_version: "1.0".to_string(),
             index_present: true,
             ticket_count: 1,
@@ -6043,5 +6363,229 @@ mod tests {
             let output = render_config_value(format, "output_format", "json").unwrap();
             assert!(!output.trim().is_empty());
         }
+    }
+
+    #[test]
+    fn parse_json_fields_validate_types() {
+        let tags = parse_json_array_field("[]", "tags").unwrap();
+        assert!(tags.is_array());
+        let empty = parse_json_array_field("", "tags").unwrap();
+        assert!(empty.as_array().unwrap().is_empty());
+        let err = parse_json_array_field("{\"a\":1}", "tags").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+
+        let obj = parse_json_object_field("{}", "custom").unwrap();
+        assert!(obj.is_object());
+        let empty_obj = parse_json_object_field("", "custom").unwrap();
+        assert!(empty_obj.as_object().unwrap().is_empty());
+        let err = parse_json_object_field("[]", "custom").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+    }
+
+    #[test]
+    fn parse_estimate_field_validates_inputs() {
+        let value = parse_estimate_field("", "").unwrap();
+        assert!(value.is_null());
+        let err = parse_estimate_field("1", "").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+        let err = parse_estimate_field("", "days").unwrap_err();
+        assert!(matches!(err, TikError::ImportExport(_)));
+        let value = parse_estimate_field("3.5", "days").unwrap();
+        assert_eq!(value["unit"], "days");
+    }
+
+    #[test]
+    fn parse_export_bundle_markdown_round_trip() {
+        let bundle = ExportBundle {
+            schema_version: "1.0".to_string(),
+            exported_at: "2026-01-01T00:00:00Z".to_string(),
+            tickets: vec![ExportTicket {
+                ticket: sample_ticket(),
+                events: Vec::new(),
+                notes_md: String::new(),
+            }],
+            milestones: vec![ExportMilestone {
+                milestone: sample_milestone(),
+                events: Vec::new(),
+            }],
+        };
+        let rendered = render_export_md(&bundle).unwrap();
+        let parsed = parse_export_bundle_from_md(&rendered).unwrap();
+        assert_eq!(parsed.tickets.len(), 1);
+        assert_eq!(parsed.milestones.len(), 1);
+    }
+
+    #[test]
+    fn parse_import_bundle_csv_requires_scope() {
+        let err = parse_import_bundle_csv("", ExportScopeArg::All).unwrap_err();
+        assert!(matches!(err, TikError::Usage(_)));
+    }
+
+    #[test]
+    fn parse_import_bundle_csv_tickets_and_milestones() {
+        let ticket_csv = render_ticket_list_csv(&[sample_ticket()]).unwrap();
+        let tickets_bundle =
+            parse_import_bundle_csv(&ticket_csv, ExportScopeArg::Tickets).unwrap();
+        assert_eq!(tickets_bundle.tickets.len(), 1);
+
+        let milestone_csv = render_milestone_list_csv(&[sample_milestone()]).unwrap();
+        let milestones_bundle =
+            parse_import_bundle_csv(&milestone_csv, ExportScopeArg::Milestones).unwrap();
+        assert_eq!(milestones_bundle.milestones.len(), 1);
+    }
+
+    #[test]
+    fn write_output_file_writes_contents() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("output.txt");
+        write_output_file(&path, "hello").unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert_eq!(contents, "hello");
+    }
+
+    fn base_cli(quiet: bool) -> Cli {
+        Cli {
+            format: None,
+            no_color: true,
+            quiet,
+            non_interactive: true,
+            project: None,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn run_requires_command_in_non_interactive_mode() {
+        let cli = base_cli(false);
+        let err = run(cli).unwrap_err();
+        assert!(matches!(err, TikError::Usage(_)));
+    }
+
+    #[test]
+    fn run_command_init_status_and_new_show() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let cli = base_cli(true);
+
+        run_command(
+            &cli,
+            Commands::Init {
+                path: Some(root.clone()),
+                setup_claude: false,
+                no_claude: true,
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::Status {
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::New {
+                title: "Alpha".to_string(),
+                summary: None,
+                description: None,
+                tag: vec!["cli".to_string()],
+                actor: Some("tester".to_string()),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        let repo = Repo::open(&root).unwrap();
+        let ticket = repo.list_tickets(None).unwrap().into_iter().next().unwrap();
+        run_command(
+            &cli,
+            Commands::Show {
+                id: ticket.id.as_str().to_string(),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn run_command_config_get_set_and_search() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let cli = base_cli(true);
+        Repo::init(&root, "0.1.0-test").unwrap();
+
+        run_command(
+            &cli,
+            Commands::Config {
+                command: ConfigCommand::Set {
+                    key: "pager".to_string(),
+                    value: "never".to_string(),
+                },
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::Config {
+                command: ConfigCommand::Get {
+                    key: "pager".to_string(),
+                },
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::New {
+                title: "Find me".to_string(),
+                summary: None,
+                description: None,
+                tag: vec!["search".to_string()],
+                actor: Some("tester".to_string()),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        run_command(
+            &cli,
+            Commands::Search {
+                query: vec!["find".to_string()],
+                limit: Some(10),
+                offset: 0,
+                all: false,
+                sort: None,
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn run_command_export_writes_output_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let output = dir.path().join("export.json");
+        let mut cli = base_cli(true);
+        cli.format = Some(OutputFormat::Json);
+        Repo::init(&root, "0.1.0-test").unwrap();
+
+        run_command(
+            &cli,
+            Commands::Export {
+                scope: ExportScopeArg::Tickets,
+                output: Some(output.clone()),
+                path: Some(root.clone()),
+            },
+        )
+        .unwrap();
+
+        assert!(output.is_file());
     }
 }

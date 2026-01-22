@@ -119,7 +119,10 @@ const TICKET_SCHEMA: &str = r#"{
             "type": "string",
             "enum": ["blocks", "blocked_by", "depends_on", "duplicate", "parent", "child"]
           },
-          "id": {"type": "string"}
+          "id": {
+            "type": "string",
+            "pattern": "^T-[0-9A-HJKMNP-TV-Z]{26}$"
+          }
         },
         "additionalProperties": false
       }
@@ -130,7 +133,7 @@ const TICKET_SCHEMA: &str = r#"{
         "type": "object",
         "required": ["type", "ref"],
         "properties": {
-          "type": {"type": "string", "enum": ["file", "url", "commit"]},
+          "type": {"type": "string", "enum": ["file", "url", "commit", "pr"]},
           "ref": {"type": "string"}
         },
         "additionalProperties": false
@@ -250,6 +253,53 @@ const CONFIG_SCHEMA: &str = r#"{
     "timezone": {
       "type": "string",
       "enum": ["UTC", "local"]
+    },
+    "ticket_default_type": {
+      "type": "string",
+      "enum": ["feature", "bug", "chore", "task", "spike"]
+    },
+    "ticket_default_priority": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "ticket_default_severity": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "critical"]
+    },
+    "ticket_types": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["feature", "bug", "chore", "task", "spike"]},
+      "uniqueItems": true
+    },
+    "ticket_priorities": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
+      "uniqueItems": true
+    },
+    "ticket_severities": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["low", "normal", "high", "critical"]},
+      "uniqueItems": true
+    },
+    "ticket_statuses": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["open", "in_progress", "blocked", "closed", "archived"]},
+      "uniqueItems": true
+    },
+    "ticket_tags": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "ticket_assignees": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "ticket_estimate_units": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["hours", "days", "weeks", "points", "story_points"]},
+      "uniqueItems": true
     }
   }
 }
@@ -486,6 +536,34 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         ticket.title = "".to_string();
+        let err = registry.validate_ticket(&ticket).unwrap_err();
+        assert!(matches!(err, TikError::Schema(_)));
+    }
+
+    #[test]
+    fn validation_rejects_invalid_relation_id() {
+        let dir = tempdir().unwrap();
+        write_default_schemas(dir.path()).unwrap();
+        let registry = SchemaRegistry::load(dir.path()).unwrap();
+
+        let ticket = Ticket::new(
+            NewTicket {
+                title: "Test".to_string(),
+                summary: None,
+                description: None,
+                tags: vec![],
+            },
+            "2026-01-01T00:00:00Z",
+        );
+
+        let mut value = serde_json::to_value(&ticket).unwrap();
+        if let Value::Object(map) = &mut value {
+            map.insert(
+                "relations".to_string(),
+                serde_json::json!([{"type": "blocks", "id": "not-a-ticket"}]),
+            );
+        }
+        let ticket: Ticket = serde_json::from_value(value).unwrap();
         let err = registry.validate_ticket(&ticket).unwrap_err();
         assert!(matches!(err, TikError::Schema(_)));
     }

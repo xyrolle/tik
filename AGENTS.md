@@ -39,6 +39,28 @@ This repository builds Tiketer: a production-grade, CLI-first, local-first, AI-f
 - Backends are pluggable and local-first; prompt export must always work.
 - AI output is structured JSON for agent compatibility.
 
+## AI Agent Operations
+When operating as an AI agent (e.g., Claude Code), follow these conventions:
+
+### Actor Identification
+- Use `--actor "agent:<name>"` for all write operations (e.g., `--actor "agent:claude"`)
+- Actor format: `type:identifier` where type is `human`, `agent`, or `system`
+- This ensures proper attribution in the append-only audit log
+
+### Machine-Readable Output
+- Always use `--format json` for deterministic, parseable output
+- Check exit codes: 0=success, 4=not found, 5=repo invalid, 6=lock contention
+- Retry on exit code 6 (lock contention) after a brief delay
+
+### Non-Interactive Mode
+- Use `--non-interactive` when running in automation contexts
+- Never rely on prompts or interactive input
+- All required data must be provided via flags
+
+### Quick Reference
+See `CLAUDE.md` for a condensed reference suitable for AI agent context.
+See `.claude/skills/tiketer.md` for the Claude Code skill definition.
+
 ## Locking and Concurrency
 - File locks are mandatory for write operations.
 - Lock ordering is deterministic: repo lock, then ticket lock.
